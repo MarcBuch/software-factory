@@ -1,0 +1,3 @@
+# Software Factory CLI
+
+Install dependencies with `bun install`, then run `bun run packages/cli/src/index.ts --help` (or `factory` after linking). Run inside a Git worktree. Initialize with `factory init`; default mode ignores `.factory/`, while `factory init --track` removes the exact generated ignore entry without touching unrelated rules. Create missions, milestones, and tasks with the `mission create`, `milestone create`, and `task create` commands. Add `--json` to commands for automation; errors are JSON on stderr in JSON mode. Records live as one metadata line followed by one complete nested mission per line in `.factory/missions.jsonl`.
