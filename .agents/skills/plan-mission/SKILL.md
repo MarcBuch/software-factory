@@ -33,7 +33,7 @@ Run the following ordered workflow, using each command's `--json` result and par
 3. For each task in milestone order, run `factory mission task create --milestone "$milestoneId" --title "<title>" --type <implementation|verification> --risk <low|medium|high> --verification "<note>" --json`.
 4. Use only generated `mis_*`, `mil_*`, and `tsk_*` IDs returned by JSON; never supply presentation IDs.
 
-The CLI stores current state in `.factory/missions.jsonl`: line one is metadata/schema version, and every later line is one complete nested mission with all milestones and tasks. Child changes rewrite the parent mission line atomically; they are not event lines. `run-mission` compatibility remains separate: its current tooling and `.opencode/tools/mission.ts` are not migrated by this skill.
+The CLI stores current state in `.factory/missions.jsonl`: line one is metadata/schema version, and every later line is one complete nested mission with all milestones and tasks. Child changes rewrite the parent mission line atomically; they are not event lines. `run-mission` consumes this Factory state using the generated `mis_*` ID; it does not retain separate compatibility state or initialize missions.
 
 ## Rules
 

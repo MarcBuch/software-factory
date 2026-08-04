@@ -65,7 +65,7 @@ Use `exhaustive` only for high-risk or explicitly requested work.
 
 ## Milestone Verification
 
-Determine affected workspaces from concrete file paths in task handoffs and task diffs.
+Determine affected workspaces from worker-reported paths and task diffs.
 
 | Mode | Milestone check |
 |---|---|
@@ -77,7 +77,7 @@ Do not run root-wide tests unless multiple workspaces were modified and there is
 
 For this repo, milestone verification for `apps/*` or `packages/*` should use the root `bun run check` command as the default routine check because those workspace-local `check` scripts are only typechecks.
 
-Completion criterion: every workspace touched by a handoff path has an appropriate milestone check result, or a recorded reason why no check applies.
+Completion criterion: every affected workspace has an appropriate milestone check result, or a recorded reason why no check applies.
 
 ## Mission-End Verification
 

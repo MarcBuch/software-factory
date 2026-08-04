@@ -87,6 +87,18 @@ describe("factory CLI", () => {
     expect(await Bun.file(gitignore).text()).toBe("node_modules/\ncustom-output\n\n.factory/\n");
   });
 
+  test("installs mission skills without overwriting existing skills", async () => {
+    const directory = await repo();
+    const installed = await run(directory, "mission", "init", "--skills", "--json");
+    expect(installed.exitCode).toBe(0);
+    expect(JSON.parse(installed.stdout)).toMatchObject({ skillsInstalled: true });
+    expect(await Bun.file(join(directory, ".agents", "skills", "plan-mission", "SKILL.md")).exists()).toBe(true);
+    expect(await Bun.file(join(directory, ".agents", "skills", "run-mission", "SKILL.md")).exists()).toBe(true);
+    const duplicate = await run(directory, "mission", "init", "--skills", "--json");
+    expect(duplicate.exitCode).not.toBe(0);
+    expect(JSON.parse(duplicate.stderr).error).toContain("Mission skill already exists");
+  });
+
   test("recovers stale locks and reports bad relationships and corrupt stores as JSON", async () => {
     const directory = await repo();
     const badRelationship = await run(directory, "mission", "milestone", "create", "--mission", "mis_bad", "--title", "x", "--json");

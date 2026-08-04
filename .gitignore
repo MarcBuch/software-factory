@@ -1,6 +1,7 @@
-.opencode/mission.json
-.opencode/handoffs.jsonl
 node_modules/
+
+.opencode/mission.json
+
 
 
 

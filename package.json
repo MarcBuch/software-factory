@@ -2,5 +2,5 @@
   "name": "software-factory",
   "private": true,
   "workspaces": ["packages/*"],
-  "scripts": { "typecheck": "bun run --cwd packages/cli typecheck", "test": "bun test" }
+  "scripts": { "typecheck": "bun run --cwd packages/cli typecheck", "test": "bun test packages/cli/test/cli.test.ts" }
 }

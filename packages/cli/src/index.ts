@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { z } from "zod";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile, open, stat } from "node:fs/promises";
+import { cp, mkdir, readFile, rename, rm, writeFile, open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -24,6 +24,9 @@ async function projectRoot(){
   catch { throw Error("factory must be run inside a Git worktree"); }
 }
 async function paths(){const root=await projectRoot(),dir=join(root,".factory");return {root,dir,file:join(dir,"missions.jsonl"),lock:join(dir,"missions.lock")};}
+const missionSkills=["plan-mission","run-mission"];
+const skillSource=join(import.meta.dir,"..","..","..",".agents","skills");
+async function installMissionSkills(root:string){const destination=join(root,".agents","skills");for(const name of missionSkills)if(existsSync(join(destination,name)))throw Error(`Mission skill already exists: .agents/skills/${name}`);await mkdir(destination,{recursive:true});for(const name of missionSkills)await cp(join(skillSource,name),join(destination,name),{recursive:true});}
 function validateAll(missions:MissionType[]){const ids=new Set<string>();for(const m of missions){for(const x of [m,...m.milestones,...m.milestones.flatMap(v=>v.tasks)]){if(ids.has(x.id))throw Error(`Duplicate ID: ${x.id}`);ids.add(x.id);}}return missions;}
 function locateTask(missions:MissionType[],id:string){for(const mission of missions)for(const milestone of mission.milestones){const task=milestone.tasks.find(x=>x.id===id);if(task)return {mission,milestone,task};}return undefined;}
 function lifecycleStatus(value:string):value is "open"|"in_progress"|"closed" { return value==="open"||value==="in_progress"||value==="closed"; }
@@ -41,8 +44,8 @@ function output(value:unknown,json:boolean){console.log(json?JSON.stringify(valu
 function jsonOption(c:Command){return c.option("--json","Output JSON");}
 const program=new Command().name("factory").description("Software Factory mission planner").option("--json","Output JSON errors and data");
 const mission=program.command("mission");
-const init=mission.command("init").option("--track","Keep .factory records trackable");jsonOption(init);
-init.action(async(opts,cmd)=>withLock(async()=>{const p=await paths();await mkdir(p.dir,{recursive:true});if(!existsSync(p.file))await save([]);const g=join(p.root,".gitignore");let lines=existsSync(g)?(await readFile(g,"utf8")).split(/\r?\n/):[];const exact=(v:string)=>v.trim()===".factory/";lines=lines.filter(v=>!exact(v));if(!opts.track)lines.push(".factory/");while(lines.length&&lines.at(-1)==="")lines.pop();await writeFile(g,lines.join("\n")+"\n");output({initialized:true,path:p.file,tracked:!!opts.track},isJson(cmd));}));
+const init=mission.command("init").option("--track","Keep .factory records trackable").option("--skills","Install the plan-mission and run-mission skills");jsonOption(init);
+init.action(async(opts,cmd)=>withLock(async()=>{const p=await paths();await mkdir(p.dir,{recursive:true});if(!existsSync(p.file))await save([]);const g=join(p.root,".gitignore");let lines=existsSync(g)?(await readFile(g,"utf8")).split(/\r?\n/):[];const exact=(v:string)=>v.trim()===".factory/";lines=lines.filter(v=>!exact(v));if(!opts.track)lines.push(".factory/");while(lines.length&&lines.at(-1)==="")lines.pop();await writeFile(g,lines.join("\n")+"\n");if(opts.skills)await installMissionSkills(p.root);output({initialized:true,path:p.file,tracked:!!opts.track,skillsInstalled:!!opts.skills},isJson(cmd));}));
 const mc=jsonOption(mission.command("create")).requiredOption("--title <title>").option("--verification-mode <mode>","verification mode","standard");mc.action(async(opts,cmd)=>withLock(async()=>{const p=await paths(),all=await load(p.file),t=now(),m=Mission.parse({id:makeId("mis"),title:clean(opts.title),verificationMode:opts.verificationMode,createdAt:t,updatedAt:t,milestones:[]});all.push(m);await save(all);output(m,isJson(cmd));}));
 const milestone=mission.command("milestone"),msc=jsonOption(milestone.command("create")).requiredOption("--mission <id>").requiredOption("--title <title>");msc.action(async(opts,cmd)=>withLock(async()=>{const p=await paths(),all=await load(p.file),m=all.find(x=>x.id===opts.mission);if(!m)throw Error(`Mission not found: ${opts.mission}`);const t=now(),ms={id:makeId("mil"),title:clean(opts.title),createdAt:t,updatedAt:t,tasks:[]};m.milestones.push(ms);m.updatedAt=t;await save(all);output(ms,isJson(cmd));}));
 const task=mission.command("task"),tc=jsonOption(task.command("create")).requiredOption("--milestone <id>").requiredOption("--title <title>").option("--type <type>","task type","implementation").option("--risk <risk>","risk","medium").requiredOption("--verification <note>");tc.action(async(opts,cmd)=>withLock(async()=>{const p=await paths(),all=await load(p.file),m=all.find(x=>x.milestones.some(ms=>ms.id===opts.milestone)),ms=m?.milestones.find(x=>x.id===opts.milestone);if(!m||!ms)throw Error(`Milestone not found: ${opts.milestone}`);const t=now(),v=Task.parse({id:makeId("tsk"),title:clean(opts.title),type:opts.type,risk:opts.risk,verification:clean(opts.verification),status:"open",createdAt:t,updatedAt:t});ms.tasks.push(v);ms.updatedAt=t;m.updatedAt=t;await save(all);output(v,isJson(cmd));}));
