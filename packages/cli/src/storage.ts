@@ -1,6 +1,6 @@
+import { execFile } from "node:child_process";
 import { mkdir, open, readFile, rm, stat, rename } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 const exec = promisify(execFile);
 async function root() {

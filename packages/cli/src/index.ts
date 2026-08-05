@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
-import { Command } from "commander";
-import { z } from "zod";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+import { Command } from "commander";
+import { z } from "zod";
+
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
   loadPlans,

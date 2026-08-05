@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFile, type ExecFileException } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFile, type ExecFileException } from "node:child_process";
+
 import { resolveDependencies, PlanSchema, validatePlansAgainstMissions } from "../src/plans";
 
 const cli = join(import.meta.dir, "..", "src", "index.ts"),
