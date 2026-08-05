@@ -1,6 +1,19 @@
 {
   "name": "software-factory",
   "private": true,
-  "workspaces": ["packages/*"],
-  "scripts": { "typecheck": "bun run --cwd packages/cli typecheck", "test": "bun test packages/cli/test/cli.test.ts" }
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "bun run --cwd packages/cli typecheck",
+    "test": "bun test packages/cli/test/cli.test.ts",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint packages/cli/src",
+    "check": "bun run format:check && bun run lint && bun run typecheck"
+  },
+  "devDependencies": {
+    "oxfmt": "0.62.0",
+    "oxlint": "1.77.0"
+  }
 }
