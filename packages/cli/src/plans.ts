@@ -28,6 +28,22 @@ export const RichSectionSchema = z.object({
 
 export const PlanStepSchema = z.object({ key: text, milestoneKey: text, title: text, type: z.enum(["implementation", "verification"]), risk: z.enum(["low", "medium", "high"]), verification: text, executionNotes: text.optional(), inputs: z.array(text).optional(), invariants: z.array(text).optional(), outcomes: z.array(text).optional(), dependsOn: z.array(text) }).strict();
 
+/** The only fields accepted from plan authors (storage/lifecycle fields are internal). */
+export const PlanInputSchema = z.object({
+  missionTitle: text,
+  verificationMode: z.enum(["fast", "standard", "exhaustive"]),
+  sections: RichSectionSchema,
+  milestones: z.array(z.object({ key: text, title: text }).strict()),
+  steps: z.array(PlanStepSchema),
+}).strict();
+export type PlanInput = z.infer<typeof PlanInputSchema>;
+export const PLAN_INPUT_EXAMPLE: PlanInput = {
+  missionTitle: "Ship the feature", verificationMode: "standard",
+  sections: { context: "Context", intent: "Intent", approach: "Approach", executionDesign: "Design", implementationDetails: "Details", alternatives: [], risks: [], acceptance: ["Verified"] },
+  milestones: [{ key: "build", title: "Build" }],
+  steps: [{ key: "implement", milestoneKey: "build", title: "Implement", type: "implementation", risk: "medium", verification: "Run tests", dependsOn: [] }],
+};
+
 const approval = <T extends z.ZodObject<any>>(schema: T) => schema.superRefine((value: any, ctx) => {
   const hasApproval = value.approvedAt !== undefined;
   if ((value.status === "approved" || value.status === "superseded") && !hasApproval)
