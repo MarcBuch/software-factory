@@ -88,6 +88,10 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
       agentName: name,
       tool: String(event.tool ?? event.name ?? event.part?.tool ?? "tool"),
       input: event.input ?? event.part?.state?.input,
+      ...(typeof (event.callID ?? event.callId ?? event.toolCallId ?? event.id) === "string"
+        ? { spanId: event.callID ?? event.callId ?? event.toolCallId ?? event.id }
+        : {}),
+      ...(type === "tool_start" || type === "tool_use" ? { phase: "start" } : {}),
     };
   else if (type === "tool_result" || type === "tool_end")
     candidate = {
@@ -96,6 +100,10 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
       agentName: name,
       tool: String(event.tool ?? event.name ?? event.part?.tool ?? "tool"),
       output: event.output ?? event.part?.state?.output,
+      ...(typeof (event.callID ?? event.callId ?? event.toolCallId ?? event.id) === "string"
+        ? { spanId: event.callID ?? event.callId ?? event.toolCallId ?? event.id }
+        : {}),
+      phase: "finish",
     };
   else if (type === "error") {
     const errorData =

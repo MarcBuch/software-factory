@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -29,6 +30,32 @@ export type RunRecord = Run & {
   childPid?: number;
   sessionId?: string;
   processIdentity?: string;
+  /** Metadata captured at creation time (request/agent are included by the CLI). */
+  metadata?: unknown;
+};
+
+export type RunPage = Readonly<{
+  runs: RunRecord[];
+  /** SQLite rowid cursor for stable newest-first polling. */
+  nextCursor?: number;
+}>;
+
+export type TracePage = Readonly<{
+  events: Array<TraceEvent & { id: number }>;
+  /** SQLite row id; pass as `after` to receive only newer events. */
+  nextCursor?: number;
+  hasMore: boolean;
+}>;
+
+export type RunListQuery = Readonly<{ limit?: number; before?: number }>;
+export type TraceQuery = Readonly<{ after?: number; limit?: number }>;
+export type ChangeToken = Readonly<{
+  latestRunRowid: number;
+  latestRunActivity: string;
+  latestTraceRowid: number;
+}>;
+export type PublicRun = Pick<Run, "id" | "status" | "startedAt" | "finishedAt" | "failure"> & {
+  metadata?: { request?: string; agentName?: string };
 };
 
 export type RunInit = {
@@ -106,7 +133,8 @@ export class WorkflowStorage {
             cost_amount REAL, cost_currency TEXT,
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
           );
-          CREATE INDEX IF NOT EXISTS trace_events_run ON trace_events(run_id, id);
+           CREATE INDEX IF NOT EXISTS trace_events_run ON trace_events(run_id, id);
+           CREATE INDEX IF NOT EXISTS runs_newest ON runs(id, started_at DESC);
           PRAGMA user_version = 1;
         `);
       })();
@@ -267,6 +295,12 @@ export class WorkflowStorage {
   getRun(id: string): RunRecord | undefined {
     const row = this.database.query<any, [string]>("SELECT * FROM runs WHERE id=?").get(id);
     if (!row) return undefined;
+    let metadata: unknown;
+    try {
+      metadata = JSON.parse(readFileSync(row.metadata_path, "utf8"));
+    } catch {
+      /* Metadata is supplementary; a missing/corrupt file must not hide a run. */
+    }
     const run: RunRecord = {
       id: row.id,
       status: row.status,
@@ -285,6 +319,7 @@ export class WorkflowStorage {
       ...(row.child_pid ? { childPid: row.child_pid } : {}),
       ...(row.session_id ? { sessionId: row.session_id } : {}),
       ...(row.process_identity ? { processIdentity: row.process_identity } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
     };
     return run;
   }
@@ -296,6 +331,61 @@ export class WorkflowStorage {
       )
       .all(runId)
       .map((row) => TraceEventSchema.parse(JSON.parse(row.payload_json)));
+  }
+
+  /** Lists runs newest-first. Cursor is the last seen SQLite rowid, avoiding offset drift. */
+  listRuns(query: RunListQuery = {}): RunPage {
+    const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 50)));
+    const rows = query.before
+      ? this.database
+          .query<any, [number, number]>(
+            "SELECT rowid, * FROM runs WHERE rowid < ? ORDER BY rowid DESC LIMIT ?",
+          )
+          .all(query.before, limit + 1)
+      : this.database
+          .query<any, [number]>("SELECT rowid, * FROM runs ORDER BY rowid DESC LIMIT ?")
+          .all(limit + 1);
+    const page = rows.slice(0, limit).map((row) => this.getRun(row.id)!);
+    return { runs: page, ...(rows.length > limit ? { nextCursor: rows[limit - 1]!.rowid } : {}) };
+  }
+
+  /** Incremental, append-ordered trace query. `after` is exclusive and stable across polling. */
+  tracePage(runId: string, query: TraceQuery = {}): TracePage {
+    const limit = Math.max(1, Math.min(500, Math.floor(query.limit ?? 100)));
+    const after = query.after ?? 0;
+    const rows = this.database
+      .query<{ id: number; payload_json: string }, [string, number, number]>(
+        "SELECT id, payload_json FROM trace_events WHERE run_id=? AND id>? ORDER BY id LIMIT ?",
+      )
+      .all(runId, after, limit + 1);
+    const events = rows
+      .slice(0, limit)
+      .map((row) => ({ ...TraceEventSchema.parse(JSON.parse(row.payload_json)), id: row.id }));
+    return {
+      events,
+      hasMore: rows.length > limit,
+      ...(events.length ? { nextCursor: rows[Math.min(rows.length, limit) - 1]!.id } : {}),
+    };
+  }
+
+  traceCursor(runId: string) {
+    return this.database
+      .query<{ id: number }, [string]>(
+        "SELECT id FROM trace_events WHERE run_id=? ORDER BY id DESC LIMIT 1",
+      )
+      .get(runId)?.id;
+  }
+
+  /** Cheap database-only token for live UI polling. */
+  changeToken(): ChangeToken {
+    return this.database
+      .query<{ latestRunRowid: number; latestRunActivity: string; latestTraceRowid: number }, []>(
+        `SELECT COALESCE((SELECT MAX(rowid) FROM runs), 0) AS latestRunRowid,
+                COALESCE((SELECT MAX(activity) FROM
+                  (SELECT COALESCE(finished_at, started_at, '0') AS activity FROM runs)), '0') AS latestRunActivity,
+                COALESCE((SELECT MAX(id) FROM trace_events), 0) AS latestTraceRowid`,
+      )
+      .get()!;
   }
 
   close() {

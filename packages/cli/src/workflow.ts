@@ -102,6 +102,12 @@ export const CostSchema = z
   .strict();
 
 const TraceBase = z.object({ runId: nonEmptyText, at: timestamp }).strict();
+const ToolSpanFields = z.object({
+  /** Stable backend/tool invocation identity when the backend provides one. */
+  spanId: nonEmptyText.optional(),
+  /** `start`/`finish` makes tool_call usable as a span without breaking old records. */
+  phase: z.enum(["start", "finish"]).optional(),
+});
 const terminalRunStatus = z.enum(["succeeded", "failed", "cancelled"]);
 const TraceEvent = z.discriminatedUnion("type", [
   TraceBase.extend({ type: z.literal("run_started") }),
@@ -118,6 +124,7 @@ const TraceEvent = z.discriminatedUnion("type", [
     tool: nonEmptyText,
     input: z.unknown().optional(),
     output: z.unknown().optional(),
+    ...ToolSpanFields.shape,
   }),
   TraceBase.extend({
     type: z.literal("error"),

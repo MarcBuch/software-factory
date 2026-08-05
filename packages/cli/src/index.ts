@@ -25,6 +25,7 @@ import {
 } from "./plans";
 import { lookupRoster, renderAgentPrompts } from "./roster";
 import { withFactoryLock } from "./storage";
+import { startUiServer } from "./ui";
 import { openWorkflowStorage } from "./workflow-storage";
 import type { RunRecord } from "./workflow-storage";
 
@@ -590,6 +591,25 @@ workflowStop.action(async (id: string, _, cmd) => {
   } finally {
     storage.close();
   }
+});
+const ui = program
+  .command("ui")
+  .description("Serve the local Workflow Session Trace UI")
+  .option("--port <port>", "HTTP port", "4173");
+ui.action(async (opts) => {
+  const port = Number(opts.port);
+  if (!Number.isInteger(port) || port < 0 || port > 65535)
+    throw Error("Port must be an integer from 0 to 65535");
+  const running = await startUiServer({ repositoryRoot: await projectRoot(), port });
+  console.error(`Workflow Session Trace UI listening at ${running.url}`);
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      running.close();
+      resolve();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
 });
 const mission = program.command("mission");
 const init = mission

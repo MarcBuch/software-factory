@@ -8,5 +8,5 @@
   "trailingComma": "all",
   "sortImports": true,
   "sortPackageJson": true,
-  "ignorePatterns": []
+  "ignorePatterns": ["packages/cli/ui/dist/**"]
 }

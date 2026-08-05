@@ -1,0 +1,395 @@
+:root {
+  font-family: "Space Grotesk", sans-serif;
+  color: #e9edf5;
+  background: #0b0d12;
+  font-synthesis: none;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button {
+  font: inherit;
+  color: inherit;
+}
+header {
+  height: 72px;
+  border-bottom: 1px solid #252a35;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 max(24px, calc((100% - 1180px) /2));
+  background: #0d0f15;
+}
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.brand strong {
+  display: block;
+  letter-spacing: 0.14em;
+  font-size: 14px;
+}
+.brand small {
+  display: block;
+  color: #788091;
+  font: 10px "DM Mono";
+  letter-spacing: 0.16em;
+}
+.mark {
+  color: #b9f15c;
+  font-size: 25px;
+}
+.live {
+  font: 11px "DM Mono";
+  letter-spacing: 0.1em;
+  color: #9ba3b5;
+}
+.live i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  background: #b9f15c;
+  border-radius: 50%;
+  margin-right: 8px;
+  box-shadow: 0 0 10px #b9f15c;
+}
+main {
+  max-width: 1180px;
+  margin: auto;
+  padding: 64px 24px 100px;
+}
+.hero,
+.detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  border-bottom: 1px solid #252a35;
+  padding-bottom: 38px;
+}
+.eyebrow,
+.section-title span,
+.panel-head span {
+  font: 11px "DM Mono";
+  letter-spacing: 0.12em;
+  color: #8690a5;
+}
+.hero h1,
+.detail-head h1 {
+  font-size: clamp(32px, 5vw, 58px);
+  line-height: 1;
+  margin: 14px 0;
+}
+.muted {
+  color: #8b94a7;
+}
+.stat {
+  text-align: right;
+}
+.stat b {
+  display: block;
+  color: #b9f15c;
+  font-size: 34px;
+}
+.stat span {
+  font: 10px "DM Mono";
+  color: #788091;
+}
+.section-title,
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 36px 0 18px;
+}
+.section-title h2,
+.panel-head h2 {
+  font-size: 18px;
+  margin: 0;
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+}
+.card {
+  background: #12151d;
+  border: 1px solid #282e3a;
+  border-radius: 6px;
+  text-align: left;
+  padding: 20px;
+  cursor: pointer;
+  transition: 0.2s;
+}
+.card:hover {
+  border-color: #b9f15c;
+  transform: translateY(-2px);
+}
+.card-top,
+.card-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #7f899c;
+  font-size: 12px;
+}
+.card h3 {
+  font-size: 16px;
+  font-weight: 500;
+  margin: 25px 0 10px;
+  min-height: 42px;
+}
+.card code,
+.detail-head code {
+  font: 11px "DM Mono";
+  color: #778197;
+}
+.card-foot {
+  border-top: 1px solid #272d38;
+  padding-top: 16px;
+  margin-top: 22px;
+  color: #aab3c3;
+}
+.card-foot b {
+  color: #b9f15c;
+}
+.pill {
+  padding: 5px 9px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font: 10px "DM Mono";
+  letter-spacing: 0.08em;
+}
+.pill.succeeded {
+  color: #b9f15c;
+  background: #25351e;
+}
+.pill.running {
+  color: #75caff;
+  background: #162b3b;
+}
+.pill.failed {
+  color: #ff8c83;
+  background: #3c2022;
+}
+.pill.pending {
+  color: #c0c6d3;
+  background: #292d36;
+}
+.more {
+  display: block;
+  margin: 28px auto;
+  border: 1px solid #3a4352;
+  background: transparent;
+  border-radius: 4px;
+  padding: 11px 22px;
+  cursor: pointer;
+}
+.more:hover {
+  border-color: #b9f15c;
+}
+.back {
+  border: 0;
+  background: none;
+  color: #aeb7c9;
+  padding: 0;
+  margin-bottom: 35px;
+  cursor: pointer;
+}
+.detail-head {
+  align-items: center;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-bottom: 1px solid #252a35;
+  margin-bottom: 40px;
+}
+.metrics div {
+  padding: 22px 10px 22px 0;
+}
+.metrics span {
+  display: block;
+  color: #788397;
+  font: 10px "DM Mono";
+  margin-bottom: 8px;
+}
+.metrics b {
+  font-size: 20px;
+  font-weight: 500;
+}
+.panel {
+  background: #12151d;
+  border: 1px solid #282e3a;
+  border-radius: 6px;
+  padding: 22px;
+  margin-bottom: 20px;
+}
+.gantt {
+  display: grid;
+  gap: 12px;
+}
+.agent {
+  border: 0;
+  background: none;
+  display: grid;
+  grid-template-columns: 130px 1fr 70px;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  cursor: pointer;
+  padding: 6px;
+}
+.agent > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent small {
+  font: 10px "DM Mono";
+  color: #798397;
+  text-align: right;
+}
+.agent.chosen > span {
+  color: #b9f15c;
+}
+.bar {
+  height: 22px;
+  background: #1e2430;
+  border-radius: 3px;
+  position: relative;
+}
+.bar i {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: #71933b;
+  border-radius: 2px;
+}
+.chosen .bar i {
+  background: #b9f15c;
+}
+.events {
+  padding-bottom: 8px;
+}
+.event {
+  display: flex;
+  gap: 18px;
+  position: relative;
+  padding: 17px 5px;
+  border-top: 1px solid #252a35;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border: 2px solid #b9f15c;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex: none;
+}
+.event-main {
+  flex: 1;
+}
+.event-title {
+  display: flex;
+  justify-content: space-between;
+  text-transform: capitalize;
+}
+.event-title time {
+  color: #7f899c;
+  font: 11px "DM Mono";
+}
+.tool {
+  display: inline-block;
+  color: #75caff;
+  margin-top: 9px;
+  font: 12px "DM Mono";
+}
+.event p {
+  color: #a9b2c2;
+  margin: 10px 0;
+  white-space: pre-wrap;
+}
+.io {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+.io details {
+  flex: 1;
+  background: #0c0f14;
+  padding: 10px;
+  border-radius: 3px;
+}
+.io summary {
+  cursor: pointer;
+  color: #b9f15c;
+  font: 11px "DM Mono";
+}
+.io pre {
+  overflow: auto;
+  color: #abb5c6;
+  font: 11px "DM Mono";
+  white-space: pre-wrap;
+}
+.usage {
+  display: block;
+  color: #8994a7;
+  font: 10px "DM Mono";
+  margin-top: 12px;
+}
+.empty,
+.error {
+  padding: 30px;
+  color: #929caf;
+}
+.error {
+  background: #3b2024;
+  color: #ffaaa2;
+  margin-bottom: 20px;
+}
+@media (max-width: 650px) {
+  header {
+    padding: 0 16px;
+  }
+  .live {
+    font-size: 9px;
+  }
+  main {
+    padding: 38px 16px;
+  }
+  .hero {
+    display: block;
+  }
+  .stat {
+    text-align: left;
+    margin-top: 28px;
+  }
+  .section-title span {
+    display: none;
+  }
+  .metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .detail-head {
+    align-items: start;
+    gap: 16px;
+  }
+  .detail-head h1 {
+    font-size: 30px;
+  }
+  .agent {
+    grid-template-columns: 95px 1fr;
+  }
+  .agent small {
+    display: none;
+  }
+  .io {
+    display: block;
+  }
+  .io details + details {
+    margin-top: 6px;
+  }
+}

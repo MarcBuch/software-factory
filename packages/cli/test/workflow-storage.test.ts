@@ -69,3 +69,32 @@ test("updates pid and backend session and cleans partial artifacts", async () =>
   ).toHaveLength(1);
   storage.close();
 });
+
+test("supports newest-first run pages and incremental trace polling", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const first = await storage.createRun({
+    systemPrompt: "s",
+    userPrompt: "one",
+    metadata: { agent: "a" },
+  });
+  storage.startRun(first.id, "2026-01-01T00:00:00.000Z");
+  storage.appendTrace({
+    runId: first.id,
+    at: "2026-01-01T00:00:01.000Z",
+    type: "error",
+    message: "x",
+  });
+  const second = await storage.createRun({ systemPrompt: "s", userPrompt: "two" });
+  const page = storage.listRuns({ limit: 1 });
+  expect(page.runs[0]?.id).toBe(second.id);
+  expect(page.nextCursor).toBeDefined();
+  expect(storage.listRuns({ limit: 1, before: page.nextCursor }).runs[0]?.id).toBe(first.id);
+  expect(storage.getRun(first.id)?.metadata).toEqual({ agent: "a" });
+  const trace = storage.tracePage(first.id, { limit: 1 });
+  expect(trace.events).toHaveLength(1);
+  expect(trace.nextCursor).toBeDefined();
+  const tail = storage.tracePage(first.id, { after: trace.nextCursor });
+  expect(tail.events).toHaveLength(1);
+  expect(storage.tracePage(first.id, { after: tail.nextCursor }).events).toHaveLength(0);
+  storage.close();
+});

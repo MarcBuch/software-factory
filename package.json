@@ -5,12 +5,13 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "bun run --cwd packages/cli typecheck",
+    "build": "bun run --cwd packages/web build",
+    "typecheck": "bun run --cwd packages/cli typecheck && bun run --cwd packages/web typecheck",
     "test": "bun test packages/cli/test/cli.test.ts",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint packages/cli/src",
-    "check": "bun run format:check && bun run lint && bun run typecheck"
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run build"
   },
   "devDependencies": {
     "oxfmt": "0.62.0",
