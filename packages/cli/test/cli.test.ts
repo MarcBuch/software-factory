@@ -41,6 +41,18 @@ const sections = {
   risks: [],
   acceptance: ["done"],
 };
+
+test("workflow help documents storage and worktree assumptions", async () => {
+  const help = await run(tmpdir(), "workflow", "--help");
+  expect(help.exitCode).toBe(0);
+  expect(help.stdout).toContain(".factory");
+  expect(help.stdout).toContain("exclusive worktree access");
+  expect(help.stdout).toContain("run");
+  expect(help.stdout).toContain("status");
+  expect(help.stdout).toContain("trace");
+  expect(help.stdout).toContain("stop");
+});
+
 async function planInput(d: string) {
   const f = join(d, "plan.json");
   await writeFile(

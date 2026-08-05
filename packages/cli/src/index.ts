@@ -8,6 +8,9 @@ import { promisify } from "node:util";
 import { Command } from "commander";
 import { z } from "zod";
 
+import { OpenCodeAdapter } from "./backend";
+import { completeAgent } from "./completion";
+import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
   loadPlans,
@@ -20,7 +23,10 @@ import {
   type Plan,
   type MissionReference,
 } from "./plans";
+import { lookupRoster, renderAgentPrompts } from "./roster";
 import { withFactoryLock } from "./storage";
+import { openWorkflowStorage } from "./workflow-storage";
+import type { RunRecord } from "./workflow-storage";
 
 const exec = promisify(execFile);
 const iso = z.string().datetime({ offset: true });
@@ -97,6 +103,48 @@ async function projectRoot() {
   } catch {
     throw Error("factory must be run inside a Git worktree");
   }
+}
+async function processIdentity(pid: number, command: readonly string[]) {
+  const { stdout } = await exec("ps", ["-o", "lstart=", "-o", "command=", "-p", String(pid)]);
+  const line = stdout.trim();
+  const match = line.match(/^(.{24})\s+(.*)$/s);
+  if (!match) throw Error(`Unable to verify backend process ${pid}`);
+  return JSON.stringify({
+    pid,
+    start: match[1].trim(),
+    command: match[2].trim(),
+    expected: command.join(" "),
+  });
+}
+async function verifyProcessIdentity(run: { childPid?: number; processIdentity?: string }) {
+  if (!run.childPid || !run.processIdentity) throw Error("Cannot safely stop unverifiable process");
+  const saved = JSON.parse(run.processIdentity) as {
+    pid: number;
+    start: string;
+    command: string;
+    expected: string;
+  };
+  if (saved.pid !== run.childPid) throw Error("Stale backend process identity");
+  const { stdout } = await exec("ps", [
+    "-o",
+    "lstart=",
+    "-o",
+    "command=",
+    "-p",
+    String(run.childPid),
+  ]);
+  const match = stdout.trim().match(/^(.{24})\s+(.*)$/s);
+  const current = match?.[2].trim().replaceAll("\\012", "\n");
+  const expected = saved.expected.replaceAll("\\012", "\n");
+  const executable = expected.split(" ")[0]!;
+  if (
+    !match ||
+    match[1].trim() !== saved.start ||
+    !current ||
+    !current.includes(executable) ||
+    !saved.command.includes(executable)
+  )
+    throw Error("Backend process identity mismatch");
 }
 async function paths() {
   const root = await projectRoot(),
@@ -202,6 +250,51 @@ function output(value: unknown, json: boolean) {
         : JSON.stringify(value, null, 2),
   );
 }
+type WorkflowFailure = NonNullable<RunRecord["failure"]>;
+type WorkflowEnvelope = { run: RunRecord | null; result?: unknown; accepted: boolean };
+function workflowFailure(
+  outcome: any,
+  boundaryFailure?: string,
+  restorationFailure?: string,
+): WorkflowFailure | undefined {
+  if (restorationFailure) return { code: "RESTORATION_FAILURE", message: restorationFailure };
+  if (boundaryFailure) return { code: "BOUNDARY_VIOLATION", message: boundaryFailure };
+  if (outcome?.kind === "agent_failure")
+    return { code: "AGENT_FAILURE", message: outcome.result.summary };
+  if (outcome?.kind === "invalid_output_exhausted")
+    return { code: "INVALID_OUTPUT", message: outcome.reason };
+  if (outcome?.kind === "backend_failure")
+    return {
+      code: "BACKEND_FAILURE",
+      message: `Backend exited with ${outcome.exit.code ?? outcome.exit.signal ?? "unknown"}`,
+    };
+  return undefined;
+}
+async function persistedResult(record: RunRecord) {
+  try {
+    return JSON.parse(await Bun.file(record.files.result).text());
+  } catch {
+    return undefined;
+  }
+}
+function workflowEnvelope(run: RunRecord | undefined, result?: unknown): WorkflowEnvelope {
+  const accepted = run?.status === "succeeded";
+  return {
+    run: run ?? null,
+    ...(result === undefined ? {} : { result }),
+    accepted,
+  };
+}
+function emitWorkflowTerminal(run: RunRecord | undefined, json: boolean, result?: unknown) {
+  output(workflowEnvelope(run, result), json);
+  if (run?.status !== "succeeded") process.exitCode = 1;
+}
+function emitWorkflowError(message: string, json: boolean) {
+  if (json)
+    output({ ...workflowEnvelope(undefined), error: { code: "WORKFLOW_ERROR", message } }, true);
+  else console.error(message);
+  process.exitCode = 1;
+}
 function jsonOption(c: Command) {
   return c.option("--json", "Output JSON");
 }
@@ -209,6 +302,295 @@ const program = new Command()
   .name("factory")
   .description("Software Factory mission planner")
   .option("--json", "Output JSON errors and data");
+
+/* Workflow execution is intentionally kept separate from the mission record.  The
+ * .factory workflow database is runtime state, not mission state. */
+const workflow = program
+  .command("workflow")
+  .description(
+    "Run repository workflows; records and traces live under .factory. Requires exclusive worktree access for Git write-boundary checks.",
+  );
+const workflowRun = jsonOption(
+  workflow
+    .command("run")
+    .description("Run an agent request (or read the request from stdin).")
+    .requiredOption("--agent <name>")
+    .argument("[request]"),
+);
+workflowRun.action(async (requestArg: string | undefined, opts, cmd) => {
+  const root = await projectRoot();
+  const request = requestArg?.trim() || (await Bun.stdin.text()).trim();
+  if (!request) {
+    emitWorkflowError("A request argument or stdin request is required", isJson(cmd));
+    return;
+  }
+  let agent;
+  try {
+    agent = lookupRoster(opts.agent);
+  } catch (error) {
+    emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
+    return;
+  }
+  const storage = await openWorkflowStorage(root);
+  let record: RunRecord | undefined;
+  let started = false;
+  let terminalEmitted = false;
+  try {
+    // Capture before creating runtime files: .factory is explicitly excluded by the boundary.
+    const boundary = await captureGitBoundary({ repositoryRoot: root });
+    const preliminary = renderAgentPrompts(agent.name, request, {});
+    record = await storage.createRun({
+      systemPrompt: preliminary.systemPrompt,
+      userPrompt: preliminary.userPrompt,
+      metadata: { agent: agent.name, request },
+    });
+    const prompts = renderAgentPrompts(agent.name, request, {
+      runId: record.id,
+      storagePath: relative(root, record.files.directory),
+    });
+    // Replace the preliminary prompt with the run-specific one (the storage API writes atomically).
+    await Bun.write(record.files.systemPrompt, prompts.systemPrompt);
+    await Bun.write(record.files.userPrompt, prompts.userPrompt);
+    storage.startRun(record.id);
+    const activeRecord = record;
+    started = true;
+    if (!isJson(cmd)) console.error(`Running ${record.id} with ${agent.name}...`);
+    const adapter = new OpenCodeAdapter({
+      executable: process.env.FACTORY_OPENCODE_EXECUTABLE,
+    });
+    let processRun;
+    try {
+      processRun = adapter.start({
+        repositoryRoot: root,
+        runId: record.id,
+        agent,
+        prompt: prompts.userPrompt,
+        systemPrompt: prompts.systemPrompt,
+        model: agent.model,
+        tools: agent.allowedTools,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = storage.finishRun(record.id, "failed", { code: "BACKEND_FAILURE", message });
+      emitWorkflowTerminal(failed, isJson(cmd));
+      terminalEmitted = true;
+      return;
+    }
+    let identity: string | undefined;
+    try {
+      identity = await processIdentity(processRun.pid, processRun.command);
+    } catch {
+      /* process may have exited */
+    }
+    storage.setAgentProcess(record.id, {
+      agentName: agent.name,
+      pid: processRun.pid,
+      ...(identity ? { identity } : {}),
+    });
+    const outcome = await completeAgent(
+      { start: () => processRun } as any,
+      {
+        repositoryRoot: root,
+        runId: record.id,
+        agent,
+        prompt: prompts.userPrompt,
+        systemPrompt: prompts.systemPrompt,
+        model: agent.model,
+        tools: agent.allowedTools,
+      },
+      async (event, activeProcess) => {
+        await storage.appendRaw(activeRecord.id, event);
+        if (event.normalized) storage.appendTrace(event.normalized);
+        let identity: string | undefined;
+        try {
+          identity = await processIdentity(activeProcess.pid, activeProcess.command);
+        } catch {
+          /* exited between event and ps */
+        }
+        storage.setAgentProcess(activeRecord.id, {
+          agentName: agent.name,
+          pid: activeProcess.pid,
+          ...(identity ? { identity } : {}),
+          sessionId: event.sessionId,
+        });
+      },
+    );
+    if ("result" in outcome) await storage.writeResult(record.id, outcome.result);
+    const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
+    let boundaryFailure: string | undefined;
+    let restorationFailure: string | undefined;
+    if (!comparison.equal) {
+      boundaryFailure = `Git boundary violation: ${JSON.stringify(comparison)}`;
+      try {
+        await restoreGitBoundary(boundary, {
+          repositoryRoot: root,
+          runtimeDirectory: join(root, ".factory"),
+          ...(process.env.FACTORY_TEST_RESTORE_FAILURE
+            ? {
+                restoreFailure: (step) => {
+                  if (step === process.env.FACTORY_TEST_RESTORE_FAILURE)
+                    throw Error(`Injected restoration failure: ${step}`);
+                },
+              }
+            : {}),
+        });
+      } catch (error) {
+        restorationFailure = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const failure = workflowFailure(outcome, boundaryFailure, restorationFailure);
+    const accepted = !failure && outcome.kind === "success";
+    const current = storage.getRun(record.id);
+    if (current?.status !== "running") {
+      emitWorkflowTerminal(
+        current,
+        isJson(cmd),
+        current ? await persistedResult(current) : undefined,
+      );
+      terminalEmitted = true;
+      return;
+    }
+    const finished = storage.finishRun(record.id, accepted ? "succeeded" : "failed", failure);
+    storage.clearAgentProcess(record.id);
+    emitWorkflowTerminal(
+      finished,
+      isJson(cmd),
+      finished ? await persistedResult(finished) : undefined,
+    );
+    terminalEmitted = true;
+  } catch (error) {
+    if (started && record) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = storage.failIfRunning(record.id, {
+        code:
+          message.includes("spawn") || message.includes("ENOENT")
+            ? "BACKEND_FAILURE"
+            : "WORKFLOW_FAILURE",
+        message,
+      });
+      try {
+        storage.clearAgentProcess(record.id);
+      } catch {
+        /* best effort */
+      }
+      if (!terminalEmitted && failed) {
+        emitWorkflowTerminal(failed, isJson(cmd), await persistedResult(failed));
+        terminalEmitted = true;
+        return;
+      }
+    }
+    throw error;
+  } finally {
+    storage.close();
+  }
+});
+
+const workflowStatus = jsonOption(
+  workflow
+    .command("status")
+    .description("Show the persisted status and result for a run.")
+    .argument("<run-id>"),
+);
+workflowStatus.action(async (id: string, _, cmd) => {
+  const storage = await openWorkflowStorage(await projectRoot());
+  try {
+    const run = storage.getRun(id);
+    if (!run) {
+      emitWorkflowError(`Run not found: ${id}`, isJson(cmd));
+      return;
+    }
+    let summary: unknown;
+    try {
+      summary = JSON.parse(await Bun.file(run.files.result).text());
+    } catch {
+      /* pending */
+    }
+    output({ run, summary }, isJson(cmd));
+  } catch (error) {
+    emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
+  } finally {
+    storage.close();
+  }
+});
+const workflowTrace = jsonOption(
+  workflow
+    .command("trace")
+    .description("Show normalized trace events and the raw stream path for a run.")
+    .argument("<run-id>"),
+);
+workflowTrace.action(async (id: string, _, cmd) => {
+  const storage = await openWorkflowStorage(await projectRoot());
+  try {
+    const run = storage.getRun(id);
+    if (!run) {
+      emitWorkflowError(`Run not found: ${id}`, isJson(cmd));
+      return;
+    }
+    output(
+      { run, runId: id, events: storage.trace(id), rawPath: run.files.rawStream },
+      isJson(cmd),
+    );
+  } catch (error) {
+    emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
+  } finally {
+    storage.close();
+  }
+});
+const workflowStop = jsonOption(
+  workflow
+    .command("stop")
+    .description("Stop an active run after verifying its backend process identity.")
+    .argument("<run-id>"),
+);
+workflowStop.action(async (id: string, _, cmd) => {
+  const storage = await openWorkflowStorage(await projectRoot());
+  try {
+    const run = storage.getRun(id);
+    if (!run) {
+      emitWorkflowError(`Run not found: ${id}`, isJson(cmd));
+      return;
+    }
+    if (run.status === "running" && run.childPid) {
+      try {
+        await verifyProcessIdentity(run);
+        process.kill(run.childPid, "SIGTERM");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+      }
+      for (let i = 0; i < 20; i++) {
+        try {
+          process.kill(run.childPid, 0);
+        } catch {
+          break;
+        }
+        await Bun.sleep(25);
+        if (i === 19) throw Error("Backend did not exit after stop request");
+      }
+      let stopped;
+      try {
+        stopped = storage.finishRun(id, "failed", {
+          code: "STOPPED",
+          failureCode: "stopped",
+          message: "Run stopped by user",
+        });
+        storage.clearAgentProcess(id);
+      } catch (error) {
+        const latest = storage.getRun(id);
+        if (!latest || latest.status === "running") throw error;
+        stopped = latest;
+      }
+      emitWorkflowTerminal(
+        stopped,
+        isJson(cmd),
+        stopped ? await persistedResult(stopped) : undefined,
+      );
+    } else emitWorkflowTerminal(run, isJson(cmd), await persistedResult(run));
+  } catch (error) {
+    emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
+  } finally {
+    storage.close();
+  }
+});
 const mission = program.command("mission");
 const init = mission
   .command("init")
@@ -683,11 +1065,39 @@ par.action(async (id, opts, cmd) =>
   }),
 );
 program.exitOverride();
-try {
-  await program.parseAsync();
-} catch (e) {
-  const json = process.argv.includes("--json");
-  if (json) console.error(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
-  else console.error(e instanceof Error ? e.message : e);
+if (process.argv.includes("workflow") && process.argv.includes("--json"))
+  program.configureOutput({ writeErr: () => {}, outputError: () => {} });
+if (
+  process.argv.includes("workflow") &&
+  process.argv.includes("run") &&
+  process.argv.includes("--json") &&
+  !process.argv.includes("--agent")
+) {
+  console.log(
+    JSON.stringify({
+      run: null,
+      accepted: false,
+      error: { code: "WORKFLOW_ERROR", message: "required option '--agent <name>' not specified" },
+    }),
+  );
   process.exitCode = 1;
+} else {
+  try {
+    await program.parseAsync();
+  } catch (e) {
+    const json = process.argv.includes("--json");
+    const workflowCommand = process.argv.includes("workflow");
+    if (json && workflowCommand)
+      console.log(
+        JSON.stringify({
+          run: null,
+          accepted: false,
+          error: { code: "WORKFLOW_ERROR", message: e instanceof Error ? e.message : String(e) },
+        }),
+      );
+    else if (json)
+      console.error(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+    else console.error(e instanceof Error ? e.message : e);
+    process.exitCode = 1;
+  }
 }
