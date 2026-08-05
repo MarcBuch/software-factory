@@ -6,7 +6,7 @@ import type { AgentRosterEntry } from "../src/workflow";
 const agent: AgentRosterEntry = {
   name: "scout",
   purpose: "inspect",
-  model: "provider/model",
+  model: "github-copilot/gpt-5.6-luna",
   systemPrompt: "system",
   userPromptTemplate: "{{request}}",
   allowedTools: ["read"],
@@ -60,9 +60,7 @@ test("OpenCode builds the documented JSON run command and streams raw/normalized
     "--dir",
     "/repo",
     "--model",
-    "provider/model",
-    "--agent",
-    "scout",
+    "github-copilot/gpt-5.6-luna",
     "system\n\ninspect",
   ]);
   const events = [];
@@ -91,6 +89,30 @@ test("OpenCode builds the documented JSON run command and streams raw/normalized
     signal: null,
     signalCode: null,
     sessionId: "ses_1",
+  });
+});
+
+test("adapter reports nested OpenCode error messages without forwarding roster names", async () => {
+  const adapter = new OpenCodeAdapter({
+    executable: "fake",
+    spawn(command) {
+      expect(command).not.toContain("--agent");
+      return {
+        pid: 2,
+        stdout: stream([
+          '{"type":"error","error":{"data":{"message":"Unexpected server error"}}}\n',
+        ]),
+        stderr: stream([]),
+        exited: Promise.resolve(1),
+      };
+    },
+  });
+  const process = adapter.start({ repositoryRoot: "/repo", runId: "r", agent, prompt: "inspect" });
+  const events = [];
+  for await (const event of process) events.push(event);
+  expect(events[0]?.normalized).toMatchObject({
+    type: "error",
+    message: "Unexpected server error",
   });
 });
 

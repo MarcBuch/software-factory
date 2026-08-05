@@ -98,9 +98,13 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
       output: event.output ?? event.part?.state?.output,
     };
   else if (type === "error") {
+    const errorData =
+      event.error && typeof event.error === "object"
+        ? (event.error as Record<string, unknown>).data
+        : event.data;
     const nestedMessage =
-      event.data && typeof event.data === "object"
-        ? (event.data as Record<string, unknown>).message
+      errorData && typeof errorData === "object"
+        ? (errorData as Record<string, unknown>).message
         : undefined;
     candidate = {
       ...base,
@@ -300,8 +304,6 @@ export class OpenCodeAdapter implements BackendAdapter {
       invocation.repositoryRoot,
       "--model",
       invocation.model ?? invocation.agent.model,
-      "--agent",
-      invocation.agent.name,
       ...(invocation._sessionId ? ["--session", invocation._sessionId] : []),
       prompt,
     ];
