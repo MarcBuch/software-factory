@@ -5,7 +5,7 @@ description: Decompose a complex goal into milestones and tasks with risk-based 
 
 # Plan Mission
 
-Use this skill to decompose work, classify risk, select `fast`, `standard`, or `exhaustive` verification, and obtain explicit approval before execution. Announce: “I'm using the plan-mission skill to structure this goal and size verification to the risk.”
+Use this skill to decompose work into a standalone plan, classify risk, select `fast`, `standard`, or `exhaustive` verification, and obtain explicit approval before creating executable mission state. Announce: “I'm using the plan-mission skill to structure this goal and size verification to the risk.”
 
 ## Planning
 
@@ -22,18 +22,19 @@ Verification mode: fast | standard | exhaustive
 | m1t1 | <Title> | implementation | <proof> |
 ```
 
-`m1`, `m1t1`, etc. are presentation references only. Ask, “Does this plan look right? Any changes before we proceed?” Then STOP. Do not invoke tools or persist anything in this turn. Preserve approval-first behavior: only on a subsequent turn after explicit approval invoke `factory`.
+`m1`, `m1t1`, etc. are stable presentation keys. They identify plan milestones and tasks before Factory assigns runtime IDs, and task dependencies use these keys. Ask, “Does this plan look right? Any changes before we proceed?” Then STOP. Do not invoke tools or persist anything in this turn. Preserve approval-first behavior: only on a subsequent turn after explicit approval invoke `factory`.
 
 ## Persisting an approved plan
 
+After approval, write the complete plan JSON to a file inside the repository. It must include the mission title, verification mode, rich sections, ordered milestone keys/titles, and task keys with title, type, risk, verification, and presentation-key dependencies.
+
 Run the following ordered workflow, using each command's `--json` result and parsing its `.id` value (an agent may parse the tool output directly; `jq` is optional):
 
-1. `factory mission create --title "<goal>" --verification-mode <mode> --json`; save `.id` as `missionId`.
-2. For each milestone in plan order, run `factory mission milestone create --mission "$missionId" --title "<title>" --json`; save `.id` as `milestoneId`.
-3. For each task in milestone order, run `factory mission task create --milestone "$milestoneId" --title "<title>" --type <implementation|verification> --risk <low|medium|high> --verification "<note>" --json`.
-4. Use only generated `mis_*`, `mil_*`, and `tsk_*` IDs returned by JSON; never supply presentation IDs.
+1. `factory plan create --input <plan.json> --json`; save `.id` as `planId`.
+2. `factory plan approve "$planId" --json`; confirm the returned revision is approved.
+3. `factory plan materialize "$planId" --json`; save `.id` as `missionId`.
 
-The CLI stores current state in `.factory/missions.jsonl`: line one is metadata/schema version, and every later line is one complete nested mission with all milestones and tasks. Child changes rewrite the parent mission line atomically; they are not event lines. `run-mission` consumes this Factory state using the generated `mis_*` ID; it does not retain separate compatibility state or initialize missions.
+Plan creation and approval write only `.factory/plans.jsonl`. Materialization requires the approved revision, resolves presentation keys to generated `mis_*`, `mil_*`, and `tsk_*` IDs, and writes one complete mission to `.factory/missions.jsonl`. The materialized mission stores `{ planId, revision }` as `sourcePlan`; it is the executable snapshot, while the plan remains the rationale and design record. If materialization fails after approval, retry `factory plan materialize "$planId"`; do not recreate the plan. Factory rejects duplicate materialization of the same plan revision.
 
 ## Rules
 
@@ -41,3 +42,4 @@ The CLI stores current state in `.factory/missions.jsonl`: line one is metadata/
 - Always present the plan and STOP for approval.
 - Never call `mission_init` from this skill or begin implementation before approval.
 - Keep verification proportional; explain any dedicated verification task.
+- Do not create missions, milestones, or tasks directly in this workflow.

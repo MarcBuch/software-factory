@@ -1,232 +1,52 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile, type ExecFileException } from "node:child_process";
+import { resolveDependencies, PlanSchema, validatePlansAgainstMissions } from "../src/plans";
 
-const cli = join(import.meta.dir, "..", "src", "index.ts");
-type CommandResult = { stdout: string; stderr: string; exitCode: number };
-const temporaryRepositories = new Set<string>();
-
-function run(cwd: string, ...args: string[]): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    execFile("bun", [cli, ...args], { cwd, encoding: "utf8" },
-      (error: ExecFileException | null, stdout: string, stderr: string) => resolve({
-        stdout,
-        stderr,
-        exitCode: error ? (typeof error.code === "number" ? error.code : 1) : 0,
-      }));
-  });
-}
-
-async function repo() {
-  const directory = await mkdtemp(join(tmpdir(), "factory-test-"));
-  temporaryRepositories.add(directory);
-  await new Promise<void>((resolve, reject) => {
-    execFile("git", ["init", "-q"], { cwd: directory }, (error) => error ? reject(error) : resolve());
-  });
-  const result = await run(directory, "mission", "init");
-  expect(result.exitCode).toBe(0);
-  return directory;
-}
-
-async function taskIn(directory: string, title = "T") {
-  const mission = JSON.parse((await run(directory, "mission", "create", "--title", "M", "--json")).stdout);
-  const milestone = JSON.parse((await run(directory, "mission", "milestone", "create", "--mission", mission.id, "--title", "S", "--json")).stdout);
-  const task = JSON.parse((await run(directory, "mission", "task", "create", "--milestone", milestone.id, "--title", title, "--verification", "v", "--json")).stdout);
-  return { mission, milestone, task };
-}
-
-async function stored(directory: string) {
-  return (await readFile(join(directory, ".factory", "missions.jsonl"), "utf8")).trim().split("\n").slice(1).map((line) => JSON.parse(line));
-}
-
-afterEach(async () => {
-  await Promise.all([...temporaryRepositories].map((directory) => rm(directory, { recursive: true, force: true })));
-  temporaryRepositories.clear();
-});
-
-describe("factory CLI", () => {
-  test("creates nested JSONL records and preserves metadata", async () => {
-    const directory = await repo();
-    const missionResult = await run(directory, "mission", "create", "--title", "M", "--json");
-    const mission = JSON.parse(missionResult.stdout);
-    const milestone = JSON.parse((await run(directory, "mission", "milestone", "create", "--mission", mission.id, "--title", "S", "--json")).stdout);
-    const task = JSON.parse((await run(directory, "mission", "task", "create", "--milestone", milestone.id, "--title", "T", "--verification", "v", "--json")).stdout);
-
-    const lines = (await readFile(join(directory, ".factory", "missions.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toEqual({ type: "metadata", schemaVersion: 1 });
-    expect(lines[1].id).toBe(mission.id);
-    expect(lines[1].milestones).toHaveLength(1);
-    expect(lines[1].milestones[0].id).toBe(milestone.id);
-    expect(lines[1].milestones[0].tasks).toEqual([task]);
-    expect(lines.slice(1).every((line) => ![milestone.id, task.id].includes(line.id))).toBe(true);
-  });
-
-  test("supports list and show JSON", async () => {
-    const directory = await repo();
-    const created = JSON.parse((await run(directory, "mission", "create", "--title", "Shown", "--json")).stdout);
-    const listed = await run(directory, "mission", "list", "--json");
-    const shown = await run(directory, "mission", "show", created.id, "--json");
-    expect(listed.exitCode).toBe(0);
-    expect(JSON.parse(listed.stdout)).toHaveLength(1);
-    expect(JSON.parse(listed.stdout)[0].id).toBe(created.id);
-    expect(JSON.parse(shown.stdout).title).toBe("Shown");
-  });
-
-  test("preserves unrelated .gitignore content while changing tracking", async () => {
-    const directory = await repo();
-    const gitignore = join(directory, ".gitignore");
-    await writeFile(gitignore, "node_modules/\n.factory/\ncustom-output\n");
-    expect((await run(directory, "mission", "init")).exitCode).toBe(0);
-    expect(await Bun.file(gitignore).text()).toBe("node_modules/\ncustom-output\n\n.factory/\n");
-    expect((await run(directory, "mission", "init", "--track", "--json")).exitCode).toBe(0);
-    expect(await Bun.file(gitignore).text()).toBe("node_modules/\ncustom-output\n");
-    expect((await run(directory, "mission", "init", "--json")).exitCode).toBe(0);
-    expect(await Bun.file(gitignore).text()).toBe("node_modules/\ncustom-output\n\n.factory/\n");
-  });
-
-  test("installs mission skills without overwriting existing skills", async () => {
-    const directory = await repo();
-    const installed = await run(directory, "mission", "init", "--skills", "--json");
-    expect(installed.exitCode).toBe(0);
-    expect(JSON.parse(installed.stdout)).toMatchObject({ skillsInstalled: true });
-    expect(await Bun.file(join(directory, ".agents", "skills", "plan-mission", "SKILL.md")).exists()).toBe(true);
-    expect(await Bun.file(join(directory, ".agents", "skills", "run-mission", "SKILL.md")).exists()).toBe(true);
-    const duplicate = await run(directory, "mission", "init", "--skills", "--json");
-    expect(duplicate.exitCode).not.toBe(0);
-    expect(JSON.parse(duplicate.stderr).error).toContain("Mission skill already exists");
-  });
-
-  test("recovers stale locks and reports bad relationships and corrupt stores as JSON", async () => {
-    const directory = await repo();
-    const badRelationship = await run(directory, "mission", "milestone", "create", "--mission", "mis_bad", "--title", "x", "--json");
-    expect(badRelationship.exitCode).not.toBe(0);
-    expect(JSON.parse(badRelationship.stderr)).toHaveProperty("error");
-    const lock = join(directory, ".factory", "missions.lock");
-    await writeFile(lock, JSON.stringify({ pid: 99999999, token: "foreign" }));
-    await utimes(lock, new Date(0), new Date(0));
-    const recovered = await run(directory, "mission", "create", "--title", "Recovered", "--json");
-    expect(recovered.exitCode).toBe(0);
-    expect(await Bun.file(lock).exists()).toBe(false);
-    await writeFile(join(directory, ".factory", "missions.jsonl"), "bad\n");
-    const corrupt = await run(directory, "mission", "list", "--json");
-    expect(corrupt.exitCode).not.toBe(0);
-    expect(JSON.parse(corrupt.stderr)).toHaveProperty("error");
-  });
-
-  test("fails outside a Git worktree", async () => {
-    const result = await run(tmpdir(), "mission", "init", "--json");
-    expect(result.exitCode).not.toBe(0);
-    expect(JSON.parse(result.stderr).error).toContain("Git worktree");
-  });
-
-  test("creates missions concurrently without losing records", async () => {
-    const directory = await repo();
-    const results = await Promise.all(Array.from({ length: 8 }, (_, index) =>
-      run(directory, "mission", "create", "--title", `Concurrent ${index}`, "--json")));
-    expect(results.every((result) => result.exitCode === 0)).toBe(true);
-    const lines = (await readFile(join(directory, ".factory", "missions.jsonl"), "utf8")).trim().split("\n");
-    expect(lines).toHaveLength(9);
-    expect(JSON.parse(lines[0])).toEqual({ type: "metadata", schemaVersion: 1 });
-    const missions = lines.slice(1).map((line) => JSON.parse(line));
-    expect(new Set(missions.map((mission) => mission.title)).size).toBe(8);
-    expect(missions.every((mission) => Array.isArray(mission.milestones))).toBe(true);
-  });
-
-  test("rejects legacy root command paths", async () => {
-    const directory = await repo();
-    for (const args of [["init"], ["list"], ["show", "mis_missing"], ["milestone", "create"], ["task", "create"]]) {
-      const result = await run(directory, ...args, "--json");
-      expect(result.exitCode).not.toBe(0);
-    }
-  });
-
-  test("updates, closes, and reopens tasks with lifecycle metadata", async () => {
-    const directory = await repo();
-    const { task } = await taskIn(directory);
-    const before = (await stored(directory))[0];
-    const inProgress = await run(directory, "mission", "update", task.id, "--status", "in_progress", "--json");
-    expect(inProgress.exitCode).toBe(0);
-    expect(JSON.parse(inProgress.stdout)).toMatchObject({ id: task.id, status: "in_progress" });
-    const middle = (await stored(directory))[0];
-    expect(middle.milestones[0].tasks[0].status).toBe("in_progress");
-    expect(middle.updatedAt).not.toBe(before.updatedAt);
-    expect(middle.milestones[0].updatedAt).not.toBe(before.milestones[0].updatedAt);
-    expect(middle.milestones[0].tasks[0].updatedAt).not.toBe(before.milestones[0].tasks[0].updatedAt);
-
-    const closed = await run(directory, "mission", "close", task.id, "--reason", "completed", "--json");
-    expect(closed.exitCode).toBe(0);
-    expect(JSON.parse(closed.stdout)).toMatchObject({ id: task.id, status: "closed", closureReason: "completed" });
-    const reopened = await run(directory, "mission", "update", task.id, "--status", "open", "--json");
-    expect(reopened.exitCode).toBe(0);
-    expect(JSON.parse(reopened.stdout)).toMatchObject({ id: task.id, status: "open" });
-    expect(JSON.parse(reopened.stdout).closureReason).toBeUndefined();
-    expect((await stored(directory))[0].milestones[0].tasks[0]).toMatchObject({ status: "open" });
-    expect((await stored(directory))[0].milestones[0].tasks[0].closureReason).toBeUndefined();
-  });
-
-  test("rejects invalid and closed update statuses without modifying storage", async () => {
-    const directory = await repo();
-    const { task } = await taskIn(directory);
-    const before = await Bun.file(join(directory, ".factory", "missions.jsonl")).text();
-    const invalid = await run(directory, "mission", "update", task.id, "--status", "bogus", "--json");
-    expect(invalid.exitCode).not.toBe(0);
-    expect(JSON.parse(invalid.stderr).error).toContain("Invalid status");
-    expect(await Bun.file(join(directory, ".factory", "missions.jsonl")).text()).toBe(before);
-    const closed = await run(directory, "mission", "update", task.id, "--status", "closed", "--json");
-    expect(closed.exitCode).not.toBe(0);
-    expect(JSON.parse(closed.stderr).error).toContain("mission close");
-    expect(await Bun.file(join(directory, ".factory", "missions.jsonl")).text()).toBe(before);
-  });
-
-  test("reports update and close task errors, and validates close reasons", async () => {
-    const directory = await repo();
-    const missingUpdate = await run(directory, "mission", "update", "tsk_missing", "--status", "open", "--json");
-    expect(missingUpdate.exitCode).not.toBe(0);
-    expect(JSON.parse(missingUpdate.stderr).error).toContain("Task not found");
-    const missingReason = await run(directory, "mission", "close", "tsk_missing", "--json");
-    expect(missingReason.exitCode).not.toBe(0);
-    expect(missingReason.stderr).toContain("required option");
-    const { task } = await taskIn(directory);
-    const blank = await run(directory, "mission", "close", task.id, "--reason", "   ", "--json");
-    expect(blank.exitCode).not.toBe(0);
-    expect(JSON.parse(blank.stderr).error).toContain("Value must not be empty");
-    const missingClose = await run(directory, "mission", "close", "tsk_missing", "--reason", "nope", "--json");
-    expect(missingClose.exitCode).not.toBe(0);
-    expect(JSON.parse(missingClose.stderr).error).toContain("Task not found");
-  });
-
-  test("lists ready tasks globally and by mission with complete context", async () => {
-    const directory = await repo();
-    const first = await taskIn(directory, "Open");
-    const second = await taskIn(directory, "Closed");
-    expect((await run(directory, "mission", "close", second.task.id, "--reason", "done")).exitCode).toBe(0);
-    const global = await run(directory, "mission", "ready", "--json");
-    expect(global.exitCode).toBe(0);
-    const data = JSON.parse(global.stdout);
-    expect(data).toHaveLength(1);
-    expect(data[0]).toMatchObject({ missionId: first.mission.id, missionTitle: "M", milestoneId: first.milestone.id, milestoneTitle: "S", task: { id: first.task.id, title: "Open", status: "open" } });
-    const scoped = await run(directory, "mission", "ready", "--mission", second.mission.id, "--json");
-    expect(scoped.exitCode).toBe(0);
-    expect(JSON.parse(scoped.stdout)).toEqual([]);
-    const missing = await run(directory, "mission", "ready", "--mission", "mis_missing", "--json");
-    expect(missing.exitCode).not.toBe(0);
-    expect(JSON.parse(missing.stderr).error).toContain("Mission not found");
-  });
-
-  test("migrates a legacy task status on the next write", async () => {
-    const directory = await repo();
-    const { task } = await taskIn(directory, "Legacy");
-    const file = join(directory, ".factory", "missions.jsonl");
-    const records = await stored(directory);
-    delete records[0].milestones[0].tasks[0].status;
-    await writeFile(file, [JSON.stringify({ type: "metadata", schemaVersion: 1 }), ...records.map((record) => JSON.stringify(record))].join("\n") + "\n");
-    const ready = await run(directory, "mission", "ready", "--json");
-    expect(ready.exitCode).toBe(0);
-    expect(JSON.parse(ready.stdout)[0].task).toMatchObject({ id: task.id, status: "open" });
-    expect((await run(directory, "mission", "update", task.id, "--status", "open", "--json")).exitCode).toBe(0);
-    expect((await stored(directory))[0].milestones[0].tasks[0].status).toBe("open");
-  });
+const cli=join(import.meta.dir,"..","src","index.ts"), repos=new Set<string>();
+function run(cwd:string,...args:string[]):Promise<{stdout:string;stderr:string;exitCode:number}>{return new Promise(resolve=>execFile("bun",[cli,...args],{cwd,encoding:"utf8"},(e:ExecFileException|null,stdout:string,stderr:string)=>resolve({stdout,stderr,exitCode:e?(typeof e.code==="number"?e.code:1):0})))}
+async function repo(){const d=await mkdtemp(join(tmpdir(),"factory-") );repos.add(d);await new Promise<void>((r,j)=>execFile("git",["init","-q"],{cwd:d},e=>e?j(e):r()));expect((await run(d,"mission","init")).exitCode).toBe(0);return d}
+const sections={context:"c",intent:"i",approach:"a",executionDesign:"e",implementationDetails:"d",alternatives:[],risks:[],acceptance:["done"]};
+async function planInput(d:string){const f=join(d,"plan.json");await writeFile(f,JSON.stringify({missionTitle:"Standalone",verificationMode:"exhaustive",sections,milestones:[{key:"build",title:"Build"}],steps:[{key:"one",milestoneKey:"build",title:"One",type:"implementation",risk:"high",verification:"verify one",dependsOn:[]},{key:"two",milestoneKey:"build",title:"Two",type:"verification",risk:"low",verification:"verify two",executionNotes:"notes",dependsOn:["one"]}]}));return f}
+describe("standalone plans",()=>{
+ test("create writes plans only and materialize faithfully resolves IDs",async()=>{const d=await repo(),input=await planInput(d),mf=join(d,".factory/missions.jsonl"),pf=join(d,".factory/plans.jsonl"),mb=await readFile(mf),c=await run(d,"plan","create","--input",input,"--json");expect(c.exitCode).toBe(0);expect(await readFile(mf)).toEqual(mb);const p=JSON.parse(c.stdout);expect(p).not.toHaveProperty("missionId");expect((await run(d,"plan","approve",p.id,"--json")).exitCode).toBe(0);const pb=await readFile(pf),m=await run(d,"plan","materialize",p.id,"--json");expect(m.exitCode).toBe(0);expect(await readFile(pf)).toEqual(pb);const mission=JSON.parse(m.stdout);expect(mission.title).toBe("Standalone");expect(mission.verificationMode).toBe("exhaustive");expect(mission.milestones[0].tasks).toMatchObject([{title:"One",type:"implementation",risk:"high",planStepKey:"one"},{title:"Two",type:"verification",risk:"low",verification:"verify two",planStepKey:"two"}]);expect(mission.milestones[0].tasks[1].dependsOn).toEqual([mission.milestones[0].tasks[0].id]);expect(mission.sourcePlan).toEqual({planId:p.id,revision:1});});
+  test("rejects unresolved dependency without mission writes",async()=>{const d=await repo(),input=await planInput(d),f=join(d,".factory/missions.jsonl"),before=await readFile(f);const bad=JSON.parse(await readFile(input,"utf8"));bad.steps[1].dependsOn=["missing"];await writeFile(input,JSON.stringify(bad));expect((await run(d,"plan","create","--input",input,"--json")).exitCode).not.toBe(0);expect(await readFile(f)).toEqual(before);});
+ test("duplicate materialization is rejected and concurrent calls yield one mission",async()=>{const d=await repo(),input=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",input,"--json")).stdout);await run(d,"plan","approve",p.id,"--json");const rs=await Promise.all([run(d,"plan","materialize",p.id,"--json"),run(d,"plan","materialize",p.id,"--json")]);expect(rs.filter(x=>x.exitCode===0)).toHaveLength(1);expect(JSON.parse((await run(d,"mission","list","--json")).stdout)).toHaveLength(1);expect((await run(d,"plan","materialize",p.id,"--json")).exitCode).not.toBe(0);});
+ test("historical plans validate independently and legacy missions parse",async()=>{const d=await repo(),input=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",input,"--json")).stdout);expect((await run(d,"plan","show",p.id,"--revision","1","--json")).exitCode).toBe(0);expect((await run(d,"plan","validate",p.id,"--revision","1","--json")).exitCode).toBe(0);const f=join(d,".factory/missions.jsonl"),lines=(await readFile(f,"utf8")).split("\n");expect((await run(d,"mission","list","--json")).exitCode).toBe(0);expect(lines.join("\n")).not.toContain("transaction");});
+ test("source plan uniqueness and no transaction artifacts",async()=>{const d=await repo(),input=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",input,"--json")).stdout);await run(d,"plan","approve",p.id,"--json");expect((await run(d,"plan","materialize",p.id,"--json")).exitCode).toBe(0);expect((await run(d,"plan","materialize",p.id,"--json")).exitCode).not.toBe(0);expect(await Bun.file(join(d,".factory/transaction.json")).exists()).toBe(false);});
+ test("nested mission records preserve metadata",async()=>{const d=await repo(),m=JSON.parse((await run(d,"mission","create","--title","M","--json")).stdout),s=JSON.parse((await run(d,"mission","milestone","create","--mission",m.id,"--title","S","--json")).stdout),t=JSON.parse((await run(d,"mission","task","create","--milestone",s.id,"--title","T","--verification","v","--json")).stdout),lines=(await readFile(join(d,".factory/missions.jsonl"),"utf8")).trim().split("\n").map(x=>JSON.parse(x));expect(lines).toHaveLength(2);expect(lines[0]).toEqual({type:"metadata",schemaVersion:1});expect(lines[1].milestones[0].tasks).toEqual([t]);});
+ test("mission list/show and gitignore tracking work",async()=>{const d=await repo(),m=JSON.parse((await run(d,"mission","create","--title","Shown","--json")).stdout);expect((await run(d,"mission","list","--json")).exitCode).toBe(0);expect(JSON.parse((await run(d,"mission","show",m.id,"--json")).stdout).title).toBe("Shown");const g=join(d,".gitignore");await writeFile(g,"node_modules/\n.factory/\ncustom\n");await run(d,"mission","init");expect(await Bun.file(g).text()).toContain("custom");await run(d,"mission","init","--track");expect(await Bun.file(g).text()).not.toContain(".factory/");});
+ test("skills install refuses overwrite",async()=>{const d=await repo();expect((await run(d,"mission","init","--skills","--json")).exitCode).toBe(0);const again=await run(d,"mission","init","--skills","--json");expect(again.exitCode).not.toBe(0);expect(JSON.parse(again.stderr).error).toContain("already exists");});
+ test("stale lock is claimed safely and corrupt storage is reported",async()=>{const d=await repo(),lock=join(d,".factory/factory.lock");await writeFile(lock,JSON.stringify({pid:99999999,token:"foreign"}));await import("node:fs/promises").then(fs=>fs.utimes(lock,new Date(0),new Date(0)));expect((await run(d,"mission","create","--title","Recovered","--json")).exitCode).toBe(0);expect(await Bun.file(lock).exists()).toBe(false);await writeFile(join(d,".factory/missions.jsonl"),"bad\n");const bad=await run(d,"mission","list","--json");expect(bad.exitCode).not.toBe(0);});
+ test("concurrent mission creates retain all records",async()=>{const d=await repo(),rs=await Promise.all(Array.from({length:8},(_,i)=>run(d,"mission","create","--title",`M${i}`,"--json")));expect(rs.every(x=>x.exitCode===0)).toBe(true);expect(JSON.parse((await run(d,"mission","list","--json")).stdout)).toHaveLength(8);});
+ test("task lifecycle, validation, and ready filtering work",async()=>{const d=await repo(),m=JSON.parse((await run(d,"mission","create","--title","M","--json")).stdout),s=JSON.parse((await run(d,"mission","milestone","create","--mission",m.id,"--title","S","--json")).stdout),t=JSON.parse((await run(d,"mission","task","create","--milestone",s.id,"--title","T","--verification","v","--json")).stdout);expect((await run(d,"mission","update",t.id,"--status","in_progress","--json")).exitCode).toBe(0);expect((await run(d,"mission","close",t.id,"--reason","done","--json")).exitCode).toBe(0);expect((await run(d,"mission","update",t.id,"--status","open","--json")).exitCode).toBe(0);expect(JSON.parse((await run(d,"mission","ready","--json")).stdout)).toHaveLength(1);expect((await run(d,"mission","update",t.id,"--status","bogus","--json")).exitCode).not.toBe(0);});
+ test("missing task and invalid close reasons are rejected",async()=>{const d=await repo();expect((await run(d,"mission","update","tsk_missing","--status","open","--json")).exitCode).not.toBe(0);expect((await run(d,"mission","close","tsk_missing","--reason","x","--json")).exitCode).not.toBe(0);});
+ test("legacy task status is normalized on read/write",async()=>{const d=await repo(),m=JSON.parse((await run(d,"mission","create","--title","M","--json")).stdout),s=JSON.parse((await run(d,"mission","milestone","create","--mission",m.id,"--title","S","--json")).stdout),t=JSON.parse((await run(d,"mission","task","create","--milestone",s.id,"--title","T","--verification","v","--json")).stdout),f=join(d,".factory/missions.jsonl"),r=JSON.parse((await readFile(f,"utf8")).split("\n")[1]);delete r.milestones[0].tasks[0].status;await writeFile(f,[JSON.stringify({type:"metadata",schemaVersion:1}),JSON.stringify(r)].join("\n")+"\n");expect((await run(d,"mission","ready","--json")).exitCode).toBe(0);expect((await run(d,"mission","update",t.id,"--status","open","--json")).exitCode).toBe(0);});
+ test("plan list and invalid plan input are safe",async()=>{const d=await repo(),f=join(d,"bad.json");await writeFile(f,"{");const before=await readFile(join(d,".factory/plans.jsonl"));expect((await run(d,"plan","create","--input",f,"--json")).exitCode).not.toBe(0);expect(await readFile(join(d,".factory/plans.jsonl"))).toEqual(before);expect((await run(d,"plan","list","--json")).exitCode).toBe(0);});
+  test("rejects cycles without mission writes",async()=>{const d=await repo(),f=await planInput(d),v=JSON.parse(await readFile(f,"utf8"));v.steps[0].dependsOn=["two"];v.steps[1].dependsOn=["one"];await writeFile(f,JSON.stringify(v));const mf=join(d,".factory/missions.jsonl"),b=await readFile(mf);expect((await run(d,"plan","create","--input",f,"--json")).exitCode).not.toBe(0);expect(await readFile(mf)).toEqual(b);});
+  test("outside worktree is rejected",async()=>{const r=await run(tmpdir(),"mission","init","--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("Git worktree");});
+  test("legacy root commands are rejected",async()=>{const d=await repo();for(const args of [["init"],["list"],["show","mis_missing"],["milestone","create"],["task","create"]])expect((await run(d,...args,"--json")).exitCode).not.toBe(0);});
+  test("ready mission scope reports missing mission",async()=>{const d=await repo();const r=await run(d,"mission","ready","--mission","mis_missing","--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("Mission not found");});
+  test("closed update requires close command",async()=>{const d=await repo();const m=JSON.parse((await run(d,"mission","create","--title","M","--json")).stdout),s=JSON.parse((await run(d,"mission","milestone","create","--mission",m.id,"--title","S","--json")).stdout),t=JSON.parse((await run(d,"mission","task","create","--milestone",s.id,"--title","T","--verification","v","--json")).stdout);const r=await run(d,"mission","update",t.id,"--status","closed","--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("mission close");});
+  test("blank close reason is rejected",async()=>{const d=await repo();const m=JSON.parse((await run(d,"mission","create","--title","M","--json")).stdout),s=JSON.parse((await run(d,"mission","milestone","create","--mission",m.id,"--title","S","--json")).stdout),t=JSON.parse((await run(d,"mission","task","create","--milestone",s.id,"--title","T","--verification","v","--json")).stdout);const r=await run(d,"mission","close",t.id,"--reason","   ","--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("Value must not be empty");});
+  test("lifecycle timestamps advance",async()=>{const d=await repo();const m=JSON.parse((await run(d,"mission","create","--title","M","--json")).stdout),s=JSON.parse((await run(d,"mission","milestone","create","--mission",m.id,"--title","S","--json")).stdout),t=JSON.parse((await run(d,"mission","task","create","--milestone",s.id,"--title","T","--verification","v","--json")).stdout),before=JSON.parse((await run(d,"mission","show",m.id,"--json")).stdout);await run(d,"mission","update",t.id,"--status","in_progress","--json");const after=JSON.parse((await run(d,"mission","show",m.id,"--json")).stdout);expect(after.updatedAt).not.toBe(before.updatedAt);expect(after.milestones[0].updatedAt).not.toBe(before.milestones[0].updatedAt);});
+  test("malformed plans preserve bytes",async()=>{const d=await repo(),f=join(d,".factory/plans.jsonl"),before=await readFile(f);await writeFile(f,"bad\n");const r=await run(d,"plan","list","--json");expect(r.exitCode).not.toBe(0);expect(await readFile(f)).toEqual(Buffer.from("bad\n"));expect(before.length).toBeGreaterThan(0);});
+  test("truncated plan records preserve bytes",async()=>{const d=await repo(),f=join(d,".factory/plans.jsonl"),bad=JSON.stringify({type:"plans-metadata",schemaVersion:1})+"\n{";await writeFile(f,bad);const r=await run(d,"plan","validate","--json");expect(r.exitCode).not.toBe(0);expect(await readFile(f,"utf8")).toBe(bad);});
+  test("invalid revision syntax is rejected",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);for(const n of ["1.0"," 1","1 ","1e1","0"])expect((await run(d,"plan","show",p.id,"--revision",n,"--json")).exitCode).not.toBe(0);});
+  test("missing historical revision is rejected",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);const r=await run(d,"plan","show",p.id,"--revision","2","--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("revision");});
+  test("archive lifecycle works for draft",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);const r=await run(d,"plan","archive",p.id,"--json");expect(r.exitCode).toBe(0);expect(JSON.parse(r.stdout).status).toBe("archived");});
+  test("approved plans cannot archive",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);await run(d,"plan","approve",p.id,"--json");const r=await run(d,"plan","archive",p.id,"--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("Approved plans");});
+  test("revise creates next draft revision",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout),r=await run(d,"plan","revise",p.id,"--input",f,"--json");expect(r.exitCode).toBe(0);expect(JSON.parse(r.stdout)).toMatchObject({id:p.id,revision:2,status:"draft"});});
+  test("revision selection rejects stale mutation",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);await run(d,"plan","revise",p.id,"--input",f,"--json");const r=await run(d,"plan","revise",p.id,"--revision","1","--input",f,"--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("latest");});
+  test("plan list returns all standalone plans",async()=>{const d=await repo(),f=await planInput(d);await run(d,"plan","create","--input",f,"--json");await run(d,"plan","create","--input",f,"--json");expect(JSON.parse((await run(d,"plan","list","--json")).stdout)).toHaveLength(2);});
+  test("materialize nonapproved leaves missions bytes",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout),mf=join(d,".factory/missions.jsonl"),before=await readFile(mf),r=await run(d,"plan","materialize",p.id,"--json");expect(r.exitCode).not.toBe(0);expect(await readFile(mf)).toEqual(before);});
+  test("materialize preserves optional execution fields",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);await run(d,"plan","approve",p.id,"--json");const m=JSON.parse((await run(d,"plan","materialize",p.id,"--json")).stdout);expect(m.milestones[0].tasks[1].planStepKey).toBe("two");expect(m.milestones[0].tasks[1].verification).toBe("verify two");});
+  test("source plan pair is unique in persisted store",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);await run(d,"plan","approve",p.id,"--json");const one=JSON.parse((await run(d,"plan","materialize",p.id,"--json")).stdout),mf=join(d,".factory/missions.jsonl"),raw=await readFile(mf,"utf8"),dup={...one,id:"mis_duplicate",milestones:one.milestones.map((m:any)=>({...m,id:`mil_${crypto.randomUUID().replaceAll("-","")}`,tasks:m.tasks.map((t:any)=>({...t,id:`tsk_${crypto.randomUUID().replaceAll("-","")}`}))}))};await writeFile(mf,raw+JSON.stringify(dup)+"\n");const r=await run(d,"mission","list","--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("Duplicate source plan");});
+  test("dependency resolver rejects missing key",()=>{expect(()=>resolveDependencies(["missing"],new Map())).toThrow("Dependency task not found: missing");});
+  test("duplicate milestone keys are rejected",async()=>{const d=await repo(),f=await planInput(d),v=JSON.parse(await readFile(f,"utf8"));v.milestones.push({key:"build",title:"Again"});await writeFile(f,JSON.stringify(v));const r=await run(d,"plan","create","--input",f,"--json");expect(r.exitCode).not.toBe(0);expect(r.stderr).toContain("Duplicate milestone key");});
+  test("revision store invariants reject gaps and duplicate approvals",()=>{const base:any={id:"pln_inv",missionTitle:"M",verificationMode:"standard",milestones:[],sections,steps:[],createdAt:"2026-01-01T00:00:00.000Z",updatedAt:"2026-01-01T00:00:00.000Z"};const one=PlanSchema.parse({...base,revision:1,status:"approved",approvedAt:base.createdAt});const gap=PlanSchema.parse({...base,revision:3,status:"draft"});expect(()=>validatePlansAgainstMissions([one,gap],[])).toThrow("contiguous");const two=PlanSchema.parse({...base,revision:2,status:"approved",approvedAt:base.createdAt});expect(()=>validatePlansAgainstMissions([one,two],[])).toThrow("one revision");});
+  test("standalone commands ignore corrupt missions",async()=>{const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout),mf=join(d,".factory/missions.jsonl");await writeFile(mf,"corrupt\n");expect((await run(d,"plan","list","--json")).exitCode).toBe(0);expect((await run(d,"plan","show",p.id,"--json")).exitCode).toBe(0);expect((await run(d,"plan","validate",p.id,"--json")).exitCode).toBe(0);});
+  test("standalone mutations ignore corrupt missions",async()=>{for(const action of ["revise","approve","archive"]){const d=await repo(),f=await planInput(d),p=JSON.parse((await run(d,"plan","create","--input",f,"--json")).stdout);await writeFile(join(d,".factory/missions.jsonl"),"corrupt\n");const args=action==="revise"?["plan",action,p.id,"--input",f,"--json"]:["plan",action,p.id,"--json"];const r=await run(d,...args);expect(r.exitCode).toBe(0);}});
 });

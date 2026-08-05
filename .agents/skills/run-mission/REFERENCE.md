@@ -2,9 +2,22 @@
 
 ## Generated IDs
 
-Use only IDs returned by `factory ... --json`: `mis_*` missions, `mil_*`
-milestones, and `tsk_*` tasks. Presentation IDs such as `m1t1` are not valid
-runtime identifiers. `run-mission` requires an explicit `missionId` everywhere.
+Use only IDs returned by `factory ... --json`: `pln_*` plans, `mis_*` missions,
+`mil_*` milestones, and `tsk_*` tasks. Presentation keys such as `m1t1` exist
+only in a plan before materialization; they are not runtime identifiers.
+`run-mission` requires an explicit `missionId` everywhere.
+
+## Plan-Backed And Manual Missions
+
+A materialized mission has `sourcePlan: { planId, revision }`. Read that exact
+plan revision and require it to remain `approved`; use its context, risks, and
+acceptance criteria as execution and validation context. The task lifecycle,
+task IDs, and dependency IDs in the materialized mission remain the runtime
+authority.
+
+Manual missions omit `sourcePlan`. They are fully supported: run them with
+their embedded task metadata and verification mode. Missing `sourcePlan` is not
+an error; a present but missing, mismatched, or non-approved reference is.
 
 ## Lifecycle
 
