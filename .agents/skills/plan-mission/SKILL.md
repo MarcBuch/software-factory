@@ -15,11 +15,14 @@ Present:
 
 ```markdown
 ## Mission Plan: <Goal Title>
+
 Verification mode: fast | standard | exhaustive
+
 ### Milestone m1: <Title>
-| ID | Title | Type | Verification |
-|----|-------|------|--------------|
-| m1t1 | <Title> | implementation | <proof> |
+
+| ID   | Title   | Type           | Verification |
+| ---- | ------- | -------------- | ------------ |
+| m1t1 | <Title> | implementation | <proof>      |
 ```
 
 `m1`, `m1t1`, etc. are stable presentation keys. They identify plan milestones and tasks before Factory assigns runtime IDs, and task dependencies use these keys. Ask, “Does this plan look right? Any changes before we proceed?” Then STOP. Do not invoke tools or persist anything in this turn. Preserve approval-first behavior: only on a subsequent turn after explicit approval invoke `factory`.

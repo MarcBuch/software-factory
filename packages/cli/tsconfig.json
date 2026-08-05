@@ -1,4 +1,11 @@
 {
-  "compilerOptions": { "strict": true, "module": "ESNext", "moduleResolution": "Bundler", "target": "ES2022", "noEmit": true, "types": ["bun"] },
+  "compilerOptions": {
+    "strict": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "noEmit": true,
+    "types": ["bun"]
+  },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

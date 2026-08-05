@@ -1,6 +1,5 @@
 ---
-description:
-  Lightweight subagent for fast, focused tasks, short edits, single-file
+description: Lightweight subagent for fast, focused tasks, short edits, single-file
   reads, quick summaries, and simple bash commands. Use instead of the
   general agent when the task is self-contained and does not require
   multi-step reasoning or broad codebase exploration.

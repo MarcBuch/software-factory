@@ -26,16 +26,16 @@ reference or that referenced revision is not approved.
 2. If it has `sourcePlan`, read `factory plan show <pln_...> --revision <n> --json`, confirm it is approved, and use its context and acceptance criteria during execution and validation.
 3. Confirm the mission verification mode and the clean-worktree/diff baseline.
 4. Only the orchestrator changes lifecycle state with `factory mission update`
-    or `factory mission close`; workers and validators do neither.
+   or `factory mission close`; workers and validators do neither.
 5. Select open tasks using `factory mission ready --mission <mis_...> --json`.
 6. Mark a task `in_progress`, delegate work, and require the worker to report
-    its changes, verification commands, and unresolved issues in its response.
+   its changes, verification commands, and unresolved issues in its response.
 7. Derive and validate the task-scoped diff from the baseline recorded before
-    delegation.
+   delegation.
 8. Have a validator return `PASS` or
-    `PASS WITH NOTES`; only then close the task with a meaningful reason.
+   `PASS WITH NOTES`; only then close the task with a meaningful reason.
 9. Retry the same task ID after failure; never invent IDs or initialize a new
-    mission. Review milestone progress and run the selected verification mode.
+   mission. Review milestone progress and run the selected verification mode.
 
 Statuses are `open`, `in_progress`, and `closed`. Progress is derived from
 child task states; closure requires a reason and evidence. Mission selection,

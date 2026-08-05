@@ -21,11 +21,11 @@ an error; a present but missing, mismatched, or non-approved reference is.
 
 ## Lifecycle
 
-| Status | Meaning |
-|---|---|
-| `open` | Available to run |
-| `in_progress` | Delegated or under validation |
-| `closed` | Accepted with a nonempty closure reason |
+| Status        | Meaning                                 |
+| ------------- | --------------------------------------- |
+| `open`        | Available to run                        |
+| `in_progress` | Delegated or under validation           |
+| `closed`      | Accepted with a nonempty closure reason |
 
 Milestone and mission progress is derived from child tasks. The orchestrator
 alone performs mutations. An unsuccessful or rejected task is retried under its same

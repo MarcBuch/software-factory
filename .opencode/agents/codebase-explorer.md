@@ -1,6 +1,5 @@
 ---
-description:
-  Read-only file search subagent for fast, focused codebase exploration,
+description: Read-only file search subagent for fast, focused codebase exploration,
   including glob-based file discovery, regex text search, and targeted
   file reads. Use when you need quick, thorough findings without edits,
   shell modifications, or broad multi-step implementation work.

@@ -10,13 +10,13 @@ runs lifecycle mutations or closes tasks. After receiving the verdict, the
 --reason "Validator: PASS..."` command.
 
 1. **Review first**
-    - Review the worker's reported changes and verification results.
+   - Review the worker's reported changes and verification results.
    - Review only the task-scoped diff.
    - Compare the claimed commands and results against the size and risk of the change.
 
 2. **Re-run commands only when warranted**
    Re-run the smallest useful verification only if one of these is true:
-    - The worker omitted required verification for the selected mode.
+   - The worker omitted required verification for the selected mode.
    - The worker reported a failing or flaky command.
    - The diff and the verification evidence do not match.
    - The task is high-risk and the validator needs to confirm one critical command.
@@ -30,11 +30,11 @@ runs lifecycle mutations or closes tasks. After receiving the verdict, the
 
 ## Verdict Rules
 
-| Verdict | Condition | Action |
-|---|---|---|
-| `PASS` | Review is clean and verification evidence is sufficient. | Return `PASS`; the ORCHESTRATOR runs `factory mission close <tsk_...> --reason "Validator: PASS"`. |
-| `PASS WITH NOTES` | Only minor or nit findings. | Return `PASS WITH NOTES`; the ORCHESTRATOR runs `factory mission close <tsk_...> --reason "Validator: PASS WITH NOTES: <notes>"`. |
-| `FAIL` | Missing proof, unsuccessful required verification, or critical/major finding. | Keep task `in_progress`, spawn Fix worker subagent, then re-validate. |
+| Verdict           | Condition                                                                     | Action                                                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `PASS`            | Review is clean and verification evidence is sufficient.                      | Return `PASS`; the ORCHESTRATOR runs `factory mission close <tsk_...> --reason "Validator: PASS"`.                                |
+| `PASS WITH NOTES` | Only minor or nit findings.                                                   | Return `PASS WITH NOTES`; the ORCHESTRATOR runs `factory mission close <tsk_...> --reason "Validator: PASS WITH NOTES: <notes>"`. |
+| `FAIL`            | Missing proof, unsuccessful required verification, or critical/major finding. | Keep task `in_progress`, spawn Fix worker subagent, then re-validate.                                                             |
 
 ## Scrutiny Validator Prompt Template
 
@@ -66,6 +66,7 @@ Record every command you run and its exit code.
 ## Fix Subagent
 
 When the validator returns `FAIL`:
+
 1. Keep or mark the task `in_progress`.
 2. Spawn a Fix worker subagent with the validator's full findings as input.
 3. After the fix subagent completes, re-spawn the validator.
