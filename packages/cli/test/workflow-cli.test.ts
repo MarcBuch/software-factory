@@ -96,7 +96,7 @@ afterEach(async () => {
 
 test("workflow CLI accepts stdout result and emits one JSON envelope", async () => {
   const fake = join(await mkdtemp(join(tmpdir(), "factory-fake-")), "fake.js");
-  const script = `console.log(JSON.stringify({type:"tool_use",tool:"read",input:{path:"tracked.txt"}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"ok",artifacts:[],notes:[]}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content,sessionID:"test-session"})+String.fromCharCode(10));`;
+  const script = `console.log(JSON.stringify({type:"tool_use",tool:"read",input:{path:"tracked.txt"}})); console.log(JSON.stringify({type:"step_finish",part:{type:"step-finish",cost:0.0123,tokens:{input:10,output:4,reasoning:2,cache:{read:3,write:1}}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"ok",artifacts:[],notes:[]}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content,sessionID:"test-session"})+String.fromCharCode(10));`;
   await writeFile(fake, `#!/usr/bin/env bun\n${script}`);
   await chmod(fake, 0o755);
   const p = await repo(fake),
@@ -113,6 +113,13 @@ test("workflow CLI accepts stdout result and emits one JSON envelope", async () 
   expect(
     trace.events.some((event: any) => event.type === "tool_call" && event.tool === "read"),
   ).toBe(true);
+  expect(trace.events).toContainEqual(
+    expect.objectContaining({
+      type: "model_step",
+      usage: { input: 10, output: 4, reasoning: 2, cacheRead: 3, cacheWrite: 1, total: 20 },
+      cost: { amount: 0.0123, currency: "USD" },
+    }),
+  );
 });
 
 test("workflow CLI uses stdin and rejects stderr-only sentinel", async () => {

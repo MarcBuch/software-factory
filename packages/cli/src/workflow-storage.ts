@@ -129,7 +129,8 @@ export class WorkflowStorage {
           CREATE TABLE IF NOT EXISTS trace_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL,
             type TEXT NOT NULL, agent_name TEXT, tool TEXT, status TEXT, payload_json TEXT NOT NULL,
-            input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
+             input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+             cache_read_tokens INTEGER, cache_write_tokens INTEGER, total_tokens INTEGER,
             cost_amount REAL, cost_currency TEXT,
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
           );
@@ -143,6 +144,13 @@ export class WorkflowStorage {
       this.database.exec("ALTER TABLE runs ADD COLUMN process_identity TEXT");
     } catch {
       /* already present */
+    }
+    for (const column of ["reasoning_tokens", "cache_read_tokens", "cache_write_tokens"]) {
+      try {
+        this.database.exec(`ALTER TABLE trace_events ADD COLUMN ${column} INTEGER`);
+      } catch {
+        /* already present */
+      }
     }
   }
 
@@ -257,8 +265,8 @@ export class WorkflowStorage {
       cost = value.cost;
     this.database
       .query(`INSERT INTO trace_events
-      (run_id, at, type, agent_name, tool, status, payload_json, input_tokens, output_tokens, total_tokens, cost_amount, cost_currency)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      (run_id, at, type, agent_name, tool, status, payload_json, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost_amount, cost_currency)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         value.runId,
         value.at,
@@ -269,6 +277,9 @@ export class WorkflowStorage {
         JSON.stringify(value),
         usage?.input ?? null,
         usage?.output ?? null,
+        usage?.reasoning ?? null,
+        usage?.cacheRead ?? null,
+        usage?.cacheWrite ?? null,
         usage?.total ?? null,
         cost?.amount ?? null,
         cost?.currency ?? null,

@@ -34,6 +34,7 @@ test("OpenCode builds the documented JSON run command and streams raw/normalized
         pid: 1234,
         stdout: stream([
           '{"type":"step_start","sessionID":"ses_1"}\n',
+          '{"type":"step_finish","part":{"type":"step-finish","cost":0.0123,"tokens":{"input":10,"output":4,"reasoning":2,"cache":{"read":3,"write":1}}}}\n',
           "malformed\n",
           '{"type":"tool_use","tool":"read","input":{"path":"x"}}\n',
         ]),
@@ -74,7 +75,16 @@ test("OpenCode builds the documented JSON run command and streams raw/normalized
     ]),
   );
   expect(events[0]?.sessionId).toBe("ses_1");
-  expect(events[0]?.normalized?.type).toBe("agent_started");
+  expect(events[0]?.normalized).toBeUndefined();
+  expect(
+    events.find(
+      (event) => event.parsed && (event.parsed as { type?: string }).type === "step_finish",
+    )?.normalized,
+  ).toMatchObject({
+    type: "model_step",
+    usage: { input: 10, output: 4, reasoning: 2, cacheRead: 3, cacheWrite: 1, total: 20 },
+    cost: { amount: 0.0123, currency: "USD" },
+  });
   expect(
     events.find(
       (event) =>

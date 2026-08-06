@@ -388,6 +388,12 @@ workflowRun.action(async (requestArg: string | undefined, opts, cmd) => {
       pid: processRun.pid,
       ...(identity ? { identity } : {}),
     });
+    storage.appendTrace({
+      runId: record.id,
+      at: new Date().toISOString(),
+      type: "agent_started",
+      agentName: agent.name,
+    });
     const outcome = await completeAgent(
       { start: () => processRun } as any,
       {
@@ -416,7 +422,26 @@ workflowRun.action(async (requestArg: string | undefined, opts, cmd) => {
         });
       },
     );
+    const agentResult =
+      "result" in outcome
+        ? outcome.result
+        : {
+            status: "failure" as const,
+            summary:
+              outcome.kind === "invalid_output_exhausted"
+                ? `Invalid agent output: ${outcome.reason}`
+                : "Backend failed before producing an agent result",
+            artifacts: [],
+            notes: [],
+          };
     if ("result" in outcome) await storage.writeResult(record.id, outcome.result);
+    storage.appendTrace({
+      runId: record.id,
+      at: new Date().toISOString(),
+      type: "agent_finished",
+      agentName: agent.name,
+      result: agentResult,
+    });
     const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
     let boundaryFailure: string | undefined;
     let restorationFailure: string | undefined;

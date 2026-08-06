@@ -90,12 +90,22 @@ export const TokenUsageSchema = z
   .object({
     input: z.number().nonnegative(),
     output: z.number().nonnegative(),
+    reasoning: z.number().nonnegative().optional(),
+    cacheRead: z.number().nonnegative().optional(),
+    cacheWrite: z.number().nonnegative().optional(),
     total: z.number().nonnegative(),
   })
   .strict()
   .superRefine((usage, context) => {
-    if (usage.total !== usage.input + usage.output)
-      context.addIssue({ code: "custom", message: "total must equal input + output" });
+    if (
+      usage.total !==
+      usage.input +
+        usage.output +
+        (usage.reasoning ?? 0) +
+        (usage.cacheRead ?? 0) +
+        (usage.cacheWrite ?? 0)
+    )
+      context.addIssue({ code: "custom", message: "total must equal all token categories" });
   });
 export const CostSchema = z
   .object({ amount: z.number().nonnegative(), currency: nonEmptyText })
@@ -125,6 +135,10 @@ const TraceEvent = z.discriminatedUnion("type", [
     input: z.unknown().optional(),
     output: z.unknown().optional(),
     ...ToolSpanFields.shape,
+  }),
+  TraceBase.extend({
+    type: z.literal("model_step"),
+    agentName: nonEmptyText,
   }),
   TraceBase.extend({
     type: z.literal("error"),

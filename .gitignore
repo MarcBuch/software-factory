@@ -6,3 +6,4 @@ node_modules/
 
 
 .factory/
+packages/cli/ui/dist/

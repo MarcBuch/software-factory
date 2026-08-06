@@ -85,6 +85,23 @@ export async function startUiServer(options: UiServerOptions) {
               : {}),
             limit: numberParam(url.searchParams.get("limit"), 100),
           });
+          const summary = storage.trace(runId).reduce(
+            (total, event) => ({
+              usage: {
+                input: total.usage.input + (event.usage?.input ?? 0),
+                output: total.usage.output + (event.usage?.output ?? 0),
+                reasoning: total.usage.reasoning + (event.usage?.reasoning ?? 0),
+                cacheRead: total.usage.cacheRead + (event.usage?.cacheRead ?? 0),
+                cacheWrite: total.usage.cacheWrite + (event.usage?.cacheWrite ?? 0),
+                total: total.usage.total + (event.usage?.total ?? 0),
+              },
+              cost: total.cost + (event.cost?.amount ?? 0),
+            }),
+            {
+              usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              cost: 0,
+            },
+          );
           return json({
             runId,
             events: page.events.map(({ runId: _runId, ...event }, index) => ({
@@ -93,6 +110,7 @@ export async function startUiServer(options: UiServerOptions) {
             })),
             nextCursor: page.nextCursor,
             hasMore: page.hasMore,
+            summary,
           });
         }
         if (path === "/api/events" || path === "/api/sessions/events") {

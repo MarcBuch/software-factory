@@ -27,14 +27,38 @@ type Event = {
   tool?: string;
   input?: unknown;
   output?: unknown;
-  usage?: { input: number; output: number; total: number };
+  usage?: {
+    input: number;
+    output: number;
+    reasoning?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    total: number;
+  };
   cost?: { amount: number; currency: string };
   result?: { summary: string };
   message?: string;
   phase?: string;
 };
 type Page = { runs: Run[]; nextCursor?: number };
-type TracePage = { runId: string; events: Event[]; nextCursor?: number; hasMore: boolean };
+type TraceSummary = {
+  usage: {
+    input: number;
+    output: number;
+    reasoning: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+};
+type TracePage = {
+  runId: string;
+  events: Event[];
+  nextCursor?: number;
+  hasMore: boolean;
+  summary: TraceSummary;
+};
 const api = async <T,>(path: string, signal?: AbortSignal): Promise<T> => {
   const r = await fetch(path, { signal });
   if (!r.ok) throw Error(await r.text());
@@ -60,6 +84,7 @@ function App() {
     [trace, setTrace] = useState<Event[]>([]),
     [traceCursor, setTraceCursor] = useState<number>(),
     [hasMore, setHasMore] = useState(false),
+    [traceSummary, setTraceSummary] = useState<TraceSummary>(),
     [error, setError] = useState("");
   const selectedRef = useRef<string | undefined>(undefined);
   const runsRef = useRef<Run[]>([]);
@@ -157,6 +182,7 @@ function App() {
         controller.signal,
       );
       if (generation !== request.generation || selectedRef.current !== id) return;
+      setTraceSummary(p.summary);
       setTrace((x) =>
         after !== undefined
           ? [
@@ -223,10 +249,12 @@ function App() {
       cancelTraceRequest();
       setTrace([]);
       setTraceCursor(undefined);
+      setTraceSummary(undefined);
       return;
     }
     cancelTraceRequest();
     setTraceCursor(undefined);
+    setTraceSummary(undefined);
     loadTrace(selected);
   }, [selected]);
   const run = runs.find((x) => x.id === selected);
@@ -261,6 +289,7 @@ function App() {
           <Detail
             run={run}
             trace={trace}
+            traceSummary={traceSummary}
             agents={agents}
             onBack={() => setSelected(undefined)}
             onMore={() => loadTrace(selected, traceCursor)}
@@ -353,6 +382,7 @@ function List({
 function Detail({
   run,
   trace,
+  traceSummary,
   agents,
   onBack,
   onMore,
@@ -360,6 +390,7 @@ function Detail({
 }: {
   run: Run;
   trace: Event[];
+  traceSummary?: TraceSummary;
   agents: string[];
   onBack: () => void;
   onMore: () => void;
@@ -370,14 +401,17 @@ function Detail({
     setAgent((current) => (current && agents.includes(current) ? current : agents[0]));
   }, [run.id, agents]);
   const selected = trace.filter((e) => !agent || e.agentName === agent);
-  const usage = selected.reduce(
+  const pageUsage = trace.reduce(
     (a, e) => ({
       input: a.input + (e.usage?.input || 0),
       output: a.output + (e.usage?.output || 0),
+      reasoning: a.reasoning + (e.usage?.reasoning || 0),
+      cacheRead: a.cacheRead + (e.usage?.cacheRead || 0),
+      cacheWrite: a.cacheWrite + (e.usage?.cacheWrite || 0),
       total: a.total + (e.usage?.total || 0),
       cost: a.cost + (e.cost?.amount || 0),
     }),
-    { input: 0, output: 0, total: 0, cost: 0 },
+    { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 },
   );
   return (
     <>
@@ -404,8 +438,11 @@ function Detail({
       </section>
       <div className="metrics">
         <Metric label="DURATION" value={duration(run.startedAt, run.finishedAt)} />
-        <Metric label="TOKENS" value={usage.total.toLocaleString()} />
-        <Metric label="COST" value={`${usage.cost.toFixed(4)} USD`} />
+        <Metric
+          label="TOKENS"
+          value={(traceSummary?.usage.total ?? pageUsage.total).toLocaleString()}
+        />
+        <Metric label="COST" value={`${(traceSummary?.cost ?? pageUsage.cost).toFixed(4)} USD`} />
         <Metric label="EVENTS" value={trace.length.toString()} />
       </div>
       <Card className="panel">
@@ -465,7 +502,8 @@ function Detail({
                 )}
                 {e.usage && (
                   <small className="usage">
-                    {e.usage.input} in · {e.usage.output} out{" "}
+                    {e.usage.input} in · {e.usage.output} out · {e.usage.reasoning ?? 0} reasoning ·{" "}
+                    {(e.usage.cacheRead ?? 0) + (e.usage.cacheWrite ?? 0)} cache{" "}
                     {e.cost ? ` · ${e.cost.amount} ${e.cost.currency}` : ""}
                   </small>
                 )}

@@ -61,7 +61,7 @@ test("workflow contracts accept valid domain records", () => {
       at: "2026-01-01T00:00:01Z",
       type: "run_finished",
       status: "succeeded",
-      usage: { input: 2, output: 3, total: 5 },
+      usage: { input: 2, output: 3, reasoning: 1, cacheRead: 4, cacheWrite: 5, total: 15 },
     }),
   ).toBeDefined();
   expect(BackendResultSchema.parse({ result })).toEqual({ result });
@@ -112,6 +112,15 @@ test("trace events accept valid event variants", () => {
   expect(
     TraceEventSchema.parse({ ...base, type: "tool_call", agentName: "a", tool: "x" }).type,
   ).toBe("tool_call");
+  expect(
+    TraceEventSchema.parse({
+      ...base,
+      type: "model_step",
+      agentName: "a",
+      usage: { input: 2, output: 3, reasoning: 1, cacheRead: 4, cacheWrite: 5, total: 15 },
+      cost: { amount: 0.01, currency: "USD" },
+    }).type,
+  ).toBe("model_step");
   expect(TraceEventSchema.parse({ ...base, type: "error", message: "oops" }).type).toBe("error");
 });
 

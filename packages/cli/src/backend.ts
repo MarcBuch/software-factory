@@ -79,9 +79,7 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
   const name = typeof event.agent === "string" ? event.agent : "opencode";
   let candidate: Record<string, unknown> | undefined;
   const type = String(event.type ?? "").toLowerCase();
-  if (type === "step_start" || type === "session_start" || type === "agent_start")
-    candidate = { ...base, type: "agent_started", agentName: name };
-  else if (type === "tool_use" || type === "tool_call" || type === "tool_start")
+  if (type === "tool_use" || type === "tool_call" || type === "tool_start")
     candidate = {
       ...base,
       type: "tool_call",
@@ -121,26 +119,28 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
       code: typeof event.code === "string" ? event.code : undefined,
       agentName: name,
     };
-  } else if (type === "step_finish" || type === "session_end" || type === "agent_finish")
-    candidate = {
-      ...base,
-      type: "agent_finished",
-      agentName: name,
-      result: {
-        status: "success",
-        summary: String(event.summary ?? "Agent finished"),
-        artifacts: [],
-        notes: [],
-      },
-    };
+  } else if (type === "step_finish") candidate = { ...base, type: "model_step", agentName: name };
   if (!candidate) return undefined;
-  const usage = event.usage;
+  const usage = event.usage ?? event.part?.tokens;
   if (usage && typeof usage === "object") {
     const input = Number(usage.input ?? usage.inputTokens ?? 0);
     const output = Number(usage.output ?? usage.outputTokens ?? 0);
-    if (Number.isFinite(input) && Number.isFinite(output))
-      candidate.usage = { input, output, total: input + output };
+    const reasoning = Number(usage.reasoning ?? 0);
+    const cacheRead = Number(usage.cacheRead ?? usage.cache?.read ?? 0);
+    const cacheWrite = Number(usage.cacheWrite ?? usage.cache?.write ?? 0);
+    if ([input, output, reasoning, cacheRead, cacheWrite].every(Number.isFinite))
+      candidate.usage = {
+        input,
+        output,
+        reasoning,
+        cacheRead,
+        cacheWrite,
+        total: input + output + reasoning + cacheRead + cacheWrite,
+      };
   }
+  const cost = event.cost ?? event.part?.cost;
+  if (typeof cost === "number" && Number.isFinite(cost))
+    candidate.cost = { amount: cost, currency: "USD" };
   return TraceEventSchema.safeParse(candidate).success ? (candidate as TraceEvent) : undefined;
 }
 

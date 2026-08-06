@@ -29,9 +29,14 @@ test("creates private run artifacts and persists normalized traces", async () =>
     type: "tool_call",
     agentName: "a",
     tool: "x",
-    usage: { input: 1, output: 2, total: 3 },
+    usage: { input: 1, output: 2, reasoning: 3, cacheRead: 4, cacheWrite: 5, total: 15 },
+    cost: { amount: 0.0123, currency: "USD" },
   });
   expect(storage.trace(run.id)).toHaveLength(2);
+  expect(storage.trace(run.id)[1]).toMatchObject({
+    usage: { input: 1, output: 2, reasoning: 3, cacheRead: 4, cacheWrite: 5, total: 15 },
+    cost: { amount: 0.0123, currency: "USD" },
+  });
   storage.close();
 });
 
