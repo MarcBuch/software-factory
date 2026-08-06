@@ -1,5 +1,5 @@
 import { ArrowLeft, Radio, Trash2 } from "lucide-react";
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import "./styles.css";
 import { createRoot } from "react-dom/client";
@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
 
 type Run = {
   id: string;
@@ -70,10 +71,33 @@ type TracePage = {
   hasMore: boolean;
   summary: TraceSummary;
 };
+type LaunchResponse = { accepted: true; run: Run };
+function responseError(text: string) {
+  try {
+    const value = JSON.parse(text);
+    if (value && typeof value === "object" && typeof value.error === "string") return value.error;
+  } catch {
+    /* Use the original response when it is not JSON. */
+  }
+  return text;
+}
 const api = async <T,>(path: string, signal?: AbortSignal, method = "GET"): Promise<T> => {
   const r = await fetch(path, { signal, method });
   if (!r.ok) {
-    const error = Error(await r.text()) as Error & { status: number };
+    const error = Error(responseError(await r.text())) as Error & { status: number };
+    error.status = r.status;
+    throw error;
+  }
+  return r.json();
+};
+const apiJson = async <T,>(path: string, body: unknown): Promise<T> => {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const error = Error(responseError(await r.text())) as Error & { status: number };
     error.status = r.status;
     throw error;
   }
@@ -100,7 +124,8 @@ function App() {
     [traceCursor, setTraceCursor] = useState<number>(),
     [hasMore, setHasMore] = useState(false),
     [traceSummary, setTraceSummary] = useState<TraceSummary>(),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [launching, setLaunching] = useState(false);
   const selectedRef = useRef<string | undefined>(undefined);
   const runsRef = useRef<Run[]>([]);
   const traceCursorRef = useRef<number | undefined>(undefined);
@@ -165,7 +190,6 @@ function App() {
           ? s
           : undefined,
       );
-      setError("");
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) setError(String(e));
     } finally {
@@ -218,7 +242,7 @@ function App() {
         setSelected((current) => (current === id ? undefined : current));
         return;
       }
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (request.controller === controller) {
         request.inFlight = false;
@@ -289,9 +313,26 @@ function App() {
       setSelected(undefined);
       setError("");
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setDeleting(false);
+    }
+  };
+  const launch = async (request: string) => {
+    setLaunching(true);
+    try {
+      const response = await apiJson<LaunchResponse>("/api/sessions", {
+        request,
+        agentName: "scout",
+      });
+      setRuns((current) => [response.run, ...current.filter((run) => run.id !== response.run.id)]);
+      setSelected(response.run.id);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      throw e;
+    } finally {
+      setLaunching(false);
     }
   };
   const agents = useMemo(
@@ -339,6 +380,8 @@ function App() {
             onSelect={setSelected}
             onMore={() => cursor && load(cursor)}
             hasMore={!!cursor}
+            launching={launching}
+            onLaunch={launch}
           />
         )}
       </main>
@@ -350,12 +393,28 @@ function List({
   onSelect,
   onMore,
   hasMore,
+  launching,
+  onLaunch,
 }: {
   runs: Run[];
   onSelect: (id: string) => void;
   onMore: () => void;
   hasMore: boolean;
+  launching: boolean;
+  onLaunch: (request: string) => Promise<void>;
 }) {
+  const [request, setRequest] = useState("");
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const value = request.trim();
+    if (!value || launching) return;
+    try {
+      await onLaunch(value);
+      setRequest("");
+    } catch {
+      /* The parent displays the server error and preserves the request for retry. */
+    }
+  };
   return (
     <>
       <section className="hero">
@@ -371,6 +430,28 @@ function List({
           <span>RECENT SESSIONS</span>
         </div>
       </section>
+      <Card className="panel">
+        <CardContent>
+          <form onSubmit={submit} className="grid gap-3">
+            <div className="panel-head">
+              <div>
+                <h2>Launch workflow</h2>
+                <span>SCOUT · READ-ONLY</span>
+              </div>
+              <Button type="submit" disabled={launching || !request.trim()}>
+                {launching ? "Launching…" : "Launch session"}
+              </Button>
+            </div>
+            <Textarea
+              value={request}
+              onChange={(event) => setRequest(event.target.value)}
+              placeholder="What should the scout inspect?"
+              aria-label="Workflow request"
+              disabled={launching}
+            />
+          </form>
+        </CardContent>
+      </Card>
       <div className="section-title">
         <h2>Recent sessions</h2>
         <span>REQUESTS FIRST · NEWEST</span>

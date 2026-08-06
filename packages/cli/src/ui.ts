@@ -2,14 +2,31 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
+import {
+  startWorkflow,
+  validateWorkflowInput,
+  WorkflowAlreadyRunning,
+  type WorkflowLaunch,
+} from "./workflow-service";
 import { openWorkflowStorage, type PublicRun, type WorkflowStorage } from "./workflow-storage";
 
-export type UiServerOptions = { port?: number; repositoryRoot: string; assetsDirectory?: string };
+export type UiServerOptions = {
+  port?: number;
+  repositoryRoot: string;
+  assetsDirectory?: string;
+  launch?: (
+    root: string,
+    input: ReturnType<typeof validateWorkflowInput>,
+  ) => Promise<WorkflowLaunch>;
+};
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
   });
 
 const publicRun = (run: Awaited<ReturnType<WorkflowStorage["getRun"]>>): PublicRun | undefined => {
@@ -66,14 +83,46 @@ export async function startUiServer(options: UiServerOptions) {
         const url = new URL(request.url);
         const path = url.pathname;
         if (path === "/api/health") return json({ ok: true });
-        if (path === "/api/sessions" || path === "/api/runs") {
+        if (path === "/api/sessions" && request.method === "POST") {
+          let input: ReturnType<typeof validateWorkflowInput>;
+          try {
+            input = validateWorkflowInput(await request.json());
+          } catch (error) {
+            return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+          }
+          try {
+            const launch = await (options.launch ?? startWorkflow)(options.repositoryRoot, input);
+            void launch.completion.catch(() => undefined);
+            if (launch.run.status !== "running")
+              return json(
+                {
+                  accepted: false,
+                  run: publicRun(launch.run),
+                  error: launch.run.failure?.message ?? "Workflow failed to start",
+                },
+                500,
+              );
+            return json({ accepted: true, run: publicRun(launch.run) }, 202);
+          } catch (error) {
+            if (
+              error instanceof WorkflowAlreadyRunning ||
+              (error instanceof Error && error.message === "Workflow already running")
+            )
+              return json({ error: "Workflow already running" }, 409);
+            return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+          }
+        }
+        if (request.method === "GET" && (path === "/api/sessions" || path === "/api/runs")) {
           const page = storage.listRuns({
             limit: numberParam(url.searchParams.get("limit"), 50),
             ...(url.searchParams.has("before")
               ? { before: numberParam(url.searchParams.get("before"), 0) }
               : {}),
           });
-          return json({ ...page, runs: page.runs.map(publicRun).filter(Boolean) });
+          return json({
+            ...page,
+            runs: page.runs.map(publicRun).filter(Boolean),
+          });
         }
         const deleteMatch = path.match(/^\/api\/(?:sessions|runs)\/([^/]+)$/);
         if (request.method === "DELETE" && deleteMatch) {
@@ -114,7 +163,14 @@ export async function startUiServer(options: UiServerOptions) {
               cost: total.cost + (event.cost?.amount ?? 0),
             }),
             {
-              usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              usage: {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
               cost: 0,
             },
           );
@@ -168,7 +224,9 @@ export async function startUiServer(options: UiServerOptions) {
               : file.endsWith(".css")
                 ? "text/css"
                 : "text/html";
-            return new Response(body, { headers: { "content-type": `${type}; charset=utf-8` } });
+            return new Response(body, {
+              headers: { "content-type": `${type}; charset=utf-8` },
+            });
           }
         }
         return json({ error: "not found" }, 404);

@@ -8,9 +8,6 @@ import { promisify } from "node:util";
 import { Command } from "commander";
 import { z } from "zod";
 
-import { OpenCodeAdapter } from "./backend";
-import { completeAgent } from "./completion";
-import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
   loadPlans,
@@ -23,9 +20,10 @@ import {
   type Plan,
   type MissionReference,
 } from "./plans";
-import { lookupRoster, renderAgentPrompts } from "./roster";
+import { lookupRoster } from "./roster";
 import { withFactoryLock } from "./storage";
 import { startUiServer } from "./ui";
+import { startWorkflow } from "./workflow-service";
 import { openWorkflowStorage } from "./workflow-storage";
 import type { RunRecord } from "./workflow-storage";
 
@@ -51,9 +49,15 @@ const Task = z
     if (v.updatedAt < v.createdAt)
       c.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
     if (v.status === "closed" && !v.closureReason)
-      c.addIssue({ code: "custom", message: "Closed tasks require a nonempty closure reason" });
+      c.addIssue({
+        code: "custom",
+        message: "Closed tasks require a nonempty closure reason",
+      });
     if (v.status !== "closed" && v.closureReason !== undefined)
-      c.addIssue({ code: "custom", message: "Only closed tasks may have a closure reason" });
+      c.addIssue({
+        code: "custom",
+        message: "Only closed tasks may have a closure reason",
+      });
   });
 const Milestone = z
   .object({
@@ -99,23 +103,13 @@ function clean(value: string) {
 async function projectRoot() {
   try {
     return (
-      await exec("git", ["rev-parse", "--show-toplevel"], { cwd: process.cwd() })
+      await exec("git", ["rev-parse", "--show-toplevel"], {
+        cwd: process.cwd(),
+      })
     ).stdout.trim();
   } catch {
     throw Error("factory must be run inside a Git worktree");
   }
-}
-async function processIdentity(pid: number, command: readonly string[]) {
-  const { stdout } = await exec("ps", ["-o", "lstart=", "-o", "command=", "-p", String(pid)]);
-  const line = stdout.trim();
-  const match = line.match(/^(.{24})\s+(.*)$/s);
-  if (!match) throw Error(`Unable to verify backend process ${pid}`);
-  return JSON.stringify({
-    pid,
-    start: match[1].trim(),
-    command: match[2].trim(),
-    expected: command.join(" "),
-  });
 }
 async function verifyProcessIdentity(run: { childPid?: number; processIdentity?: string }) {
   if (!run.childPid || !run.processIdentity) throw Error("Cannot safely stop unverifiable process");
@@ -161,7 +155,9 @@ async function installMissionSkills(root: string) {
       throw Error(`Mission skill already exists: .agents/skills/${name}`);
   await mkdir(destination, { recursive: true });
   for (const name of missionSkills)
-    await cp(join(skillSource, name), join(destination, name), { recursive: true });
+    await cp(join(skillSource, name), join(destination, name), {
+      recursive: true,
+    });
 }
 function validateAll(missions: MissionType[]) {
   const ids = new Set<string>(),
@@ -251,26 +247,11 @@ function output(value: unknown, json: boolean) {
         : JSON.stringify(value, null, 2),
   );
 }
-type WorkflowFailure = NonNullable<RunRecord["failure"]>;
-type WorkflowEnvelope = { run: RunRecord | null; result?: unknown; accepted: boolean };
-function workflowFailure(
-  outcome: any,
-  boundaryFailure?: string,
-  restorationFailure?: string,
-): WorkflowFailure | undefined {
-  if (restorationFailure) return { code: "RESTORATION_FAILURE", message: restorationFailure };
-  if (boundaryFailure) return { code: "BOUNDARY_VIOLATION", message: boundaryFailure };
-  if (outcome?.kind === "agent_failure")
-    return { code: "AGENT_FAILURE", message: outcome.result.summary };
-  if (outcome?.kind === "invalid_output_exhausted")
-    return { code: "INVALID_OUTPUT", message: outcome.reason };
-  if (outcome?.kind === "backend_failure")
-    return {
-      code: "BACKEND_FAILURE",
-      message: `Backend exited with ${outcome.exit.code ?? outcome.exit.signal ?? "unknown"}`,
-    };
-  return undefined;
-}
+type WorkflowEnvelope = {
+  run: RunRecord | null;
+  result?: unknown;
+  accepted: boolean;
+};
 async function persistedResult(record: RunRecord) {
   try {
     return JSON.parse(await Bun.file(record.files.result).text());
@@ -292,7 +273,13 @@ function emitWorkflowTerminal(run: RunRecord | undefined, json: boolean, result?
 }
 function emitWorkflowError(message: string, json: boolean) {
   if (json)
-    output({ ...workflowEnvelope(undefined), error: { code: "WORKFLOW_ERROR", message } }, true);
+    output(
+      {
+        ...workflowEnvelope(undefined),
+        error: { code: "WORKFLOW_ERROR", message },
+      },
+      true,
+    );
   else console.error(message);
   process.exitCode = 1;
 }
@@ -332,182 +319,20 @@ workflowRun.action(async (requestArg: string | undefined, opts, cmd) => {
     emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
     return;
   }
-  const storage = await openWorkflowStorage(root);
-  let record: RunRecord | undefined;
-  let started = false;
-  let terminalEmitted = false;
   try {
-    // Capture before creating runtime files: .factory is explicitly excluded by the boundary.
-    const boundary = await captureGitBoundary({ repositoryRoot: root });
-    const preliminary = renderAgentPrompts(agent.name, request, {});
-    record = await storage.createRun({
-      systemPrompt: preliminary.systemPrompt,
-      userPrompt: preliminary.userPrompt,
-      metadata: { agent: agent.name, request },
-    });
-    const prompts = renderAgentPrompts(agent.name, request, {
-      runId: record.id,
-      storagePath: relative(root, record.files.directory),
-    });
-    // Replace the preliminary prompt with the run-specific one (the storage API writes atomically).
-    await Bun.write(record.files.systemPrompt, prompts.systemPrompt);
-    await Bun.write(record.files.userPrompt, prompts.userPrompt);
-    storage.startRun(record.id);
-    const activeRecord = record;
-    started = true;
-    if (!isJson(cmd)) console.error(`Running ${record.id} with ${agent.name}...`);
-    const adapter = new OpenCodeAdapter({
-      executable: process.env.FACTORY_OPENCODE_EXECUTABLE,
-    });
-    let processRun;
-    try {
-      processRun = adapter.start({
-        repositoryRoot: root,
-        runId: record.id,
-        agent,
-        prompt: prompts.userPrompt,
-        systemPrompt: prompts.systemPrompt,
-        model: agent.model,
-        tools: agent.allowedTools,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const failed = storage.finishRun(record.id, "failed", { code: "BACKEND_FAILURE", message });
-      emitWorkflowTerminal(failed, isJson(cmd));
-      terminalEmitted = true;
-      return;
-    }
-    let identity: string | undefined;
-    try {
-      identity = await processIdentity(processRun.pid, processRun.command);
-    } catch {
-      /* process may have exited */
-    }
-    storage.setAgentProcess(record.id, {
-      agentName: agent.name,
-      pid: processRun.pid,
-      ...(identity ? { identity } : {}),
-    });
-    storage.appendTrace({
-      runId: record.id,
-      at: new Date().toISOString(),
-      type: "agent_started",
+    const launch = await startWorkflow(root, {
+      request,
       agentName: agent.name,
     });
-    const outcome = await completeAgent(
-      { start: () => processRun } as any,
-      {
-        repositoryRoot: root,
-        runId: record.id,
-        agent,
-        prompt: prompts.userPrompt,
-        systemPrompt: prompts.systemPrompt,
-        model: agent.model,
-        tools: agent.allowedTools,
-      },
-      async (event, activeProcess) => {
-        await storage.appendRaw(activeRecord.id, event);
-        if (event.normalized) storage.appendTrace(event.normalized);
-        let identity: string | undefined;
-        try {
-          identity = await processIdentity(activeProcess.pid, activeProcess.command);
-        } catch {
-          /* exited between event and ps */
-        }
-        storage.setAgentProcess(activeRecord.id, {
-          agentName: agent.name,
-          pid: activeProcess.pid,
-          ...(identity ? { identity } : {}),
-          sessionId: event.sessionId,
-        });
-      },
-    );
-    const agentResult =
-      "result" in outcome
-        ? outcome.result
-        : {
-            status: "failure" as const,
-            summary:
-              outcome.kind === "invalid_output_exhausted"
-                ? `Invalid agent output: ${outcome.reason}`
-                : "Backend failed before producing an agent result",
-            artifacts: [],
-            notes: [],
-          };
-    if ("result" in outcome) await storage.writeResult(record.id, outcome.result);
-    storage.appendTrace({
-      runId: record.id,
-      at: new Date().toISOString(),
-      type: "agent_finished",
-      agentName: agent.name,
-      result: agentResult,
-    });
-    const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
-    let boundaryFailure: string | undefined;
-    let restorationFailure: string | undefined;
-    if (!comparison.equal) {
-      boundaryFailure = `Git boundary violation: ${JSON.stringify(comparison)}`;
-      try {
-        await restoreGitBoundary(boundary, {
-          repositoryRoot: root,
-          runtimeDirectory: join(root, ".factory"),
-          ...(process.env.FACTORY_TEST_RESTORE_FAILURE
-            ? {
-                restoreFailure: (step) => {
-                  if (step === process.env.FACTORY_TEST_RESTORE_FAILURE)
-                    throw Error(`Injected restoration failure: ${step}`);
-                },
-              }
-            : {}),
-        });
-      } catch (error) {
-        restorationFailure = error instanceof Error ? error.message : String(error);
-      }
-    }
-    const failure = workflowFailure(outcome, boundaryFailure, restorationFailure);
-    const accepted = !failure && outcome.kind === "success";
-    const current = storage.getRun(record.id);
-    if (current?.status !== "running") {
-      emitWorkflowTerminal(
-        current,
-        isJson(cmd),
-        current ? await persistedResult(current) : undefined,
-      );
-      terminalEmitted = true;
-      return;
-    }
-    const finished = storage.finishRun(record.id, accepted ? "succeeded" : "failed", failure);
-    storage.clearAgentProcess(record.id);
+    if (!isJson(cmd)) console.error(`Running ${launch.run.id} with ${agent.name}...`);
+    const finished = await launch.completion;
     emitWorkflowTerminal(
       finished,
       isJson(cmd),
       finished ? await persistedResult(finished) : undefined,
     );
-    terminalEmitted = true;
   } catch (error) {
-    if (started && record) {
-      const message = error instanceof Error ? error.message : String(error);
-      const failed = storage.failIfRunning(record.id, {
-        code:
-          message.includes("spawn") || message.includes("ENOENT")
-            ? "BACKEND_FAILURE"
-            : "WORKFLOW_FAILURE",
-        message,
-      });
-      try {
-        storage.clearAgentProcess(record.id);
-      } catch {
-        /* best effort */
-      }
-      if (!terminalEmitted && failed) {
-        emitWorkflowTerminal(failed, isJson(cmd), await persistedResult(failed));
-        terminalEmitted = true;
-        return;
-      }
-    }
-    throw error;
-  } finally {
-    storage.close();
+    emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
   }
 });
 
@@ -553,7 +378,12 @@ workflowTrace.action(async (id: string, _, cmd) => {
       return;
     }
     output(
-      { run, runId: id, events: storage.trace(id), rawPath: run.files.rawStream },
+      {
+        run,
+        runId: id,
+        events: storage.trace(id),
+        rawPath: run.files.rawStream,
+      },
       isJson(cmd),
     );
   } catch (error) {
@@ -642,7 +472,10 @@ ui.action(async (opts) => {
   const port = Number(opts.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw Error("Port must be an integer from 0 to 65535");
-  const running = await startUiServer({ repositoryRoot: await projectRoot(), port });
+  const running = await startUiServer({
+    repositoryRoot: await projectRoot(),
+    port,
+  });
   console.error(`Workflow Session Trace UI listening at ${running.url}`);
   await new Promise<void>((resolve) => {
     const stop = () => {
@@ -677,7 +510,12 @@ init.action(async (opts, cmd) =>
     await writeFile(g, lines.join("\n") + "\n");
     if (opts.skills) await installMissionSkills(p.root);
     output(
-      { initialized: true, path: p.file, tracked: !!opts.track, skillsInstalled: !!opts.skills },
+      {
+        initialized: true,
+        path: p.file,
+        tracked: !!opts.track,
+        skillsInstalled: !!opts.skills,
+      },
       isJson(cmd),
     );
   }),
@@ -714,7 +552,13 @@ msc.action(async (opts, cmd) =>
       m = all.find((x) => x.id === opts.mission);
     if (!m) throw Error(`Mission not found: ${opts.mission}`);
     const t = now(),
-      ms = { id: makeId("mil"), title: clean(opts.title), createdAt: t, updatedAt: t, tasks: [] };
+      ms = {
+        id: makeId("mil"),
+        title: clean(opts.title),
+        createdAt: t,
+        updatedAt: t,
+        tasks: [],
+      };
     m.milestones.push(ms);
     m.updatedAt = t;
     await save(all);
@@ -899,7 +743,14 @@ function planInput(
   createdAt: string,
   updatedAt: string,
 ): Plan {
-  const candidate = { ...parsePlanInput(value), id, revision, status, createdAt, updatedAt };
+  const candidate = {
+    ...parsePlanInput(value),
+    id,
+    revision,
+    status,
+    createdAt,
+    updatedAt,
+  };
   if (status !== "approved" && status !== "superseded") delete (candidate as any).approvedAt;
   return PlanSchema.parse(candidate);
 }
@@ -936,7 +787,13 @@ materialize.action(async (id, opts, cmd) =>
       if (!ms) {
         const def = planRecord.milestones.find((m: any) => m.key === step.milestoneKey);
         if (!def) throw Error(`Unknown milestone key: ${step.milestoneKey}`);
-        ms = { id: makeId("mil"), title: def.title, createdAt: t, updatedAt: t, tasks: [] };
+        ms = {
+          id: makeId("mil"),
+          title: def.title,
+          createdAt: t,
+          updatedAt: t,
+          tasks: [],
+        };
         milestones.set(step.milestoneKey, ms);
       }
       const tid = makeId("tsk");
@@ -1055,7 +912,12 @@ pr.action(async (id, opts, cmd) =>
       });
     const next = all.map((x) =>
       x.id === id && x.revision === base.revision
-        ? { ...x, status: "superseded" as const, updatedAt: t, approvedAt: x.approvedAt ?? t }
+        ? {
+            ...x,
+            status: "superseded" as const,
+            updatedAt: t,
+            approvedAt: x.approvedAt ?? t,
+          }
         : x,
     );
     next.push(record);
@@ -1107,7 +969,12 @@ par.action(async (id, opts, cmd) =>
     const next = all
       .map((x) =>
         x === target
-          ? { ...x, status: "archived" as const, updatedAt: now(), approvedAt: undefined }
+          ? {
+              ...x,
+              status: "archived" as const,
+              updatedAt: now(),
+              approvedAt: undefined,
+            }
           : x,
       )
       .map((x) => {
@@ -1139,7 +1006,10 @@ if (
     JSON.stringify({
       run: null,
       accepted: false,
-      error: { code: "WORKFLOW_ERROR", message: "required option '--agent <name>' not specified" },
+      error: {
+        code: "WORKFLOW_ERROR",
+        message: "required option '--agent <name>' not specified",
+      },
     }),
   );
   process.exitCode = 1;
@@ -1154,7 +1024,10 @@ if (
         JSON.stringify({
           run: null,
           accepted: false,
-          error: { code: "WORKFLOW_ERROR", message: e instanceof Error ? e.message : String(e) },
+          error: {
+            code: "WORKFLOW_ERROR",
+            message: e instanceof Error ? e.message : String(e),
+          },
         }),
       );
     else if (json)
