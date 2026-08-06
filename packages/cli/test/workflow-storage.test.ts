@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -101,5 +101,41 @@ test("supports newest-first run pages and incremental trace polling", async () =
   const tail = storage.tracePage(first.id, { after: trace.nextCursor });
   expect(tail.events).toHaveLength(1);
   expect(storage.tracePage(first.id, { after: tail.nextCursor }).events).toHaveLength(0);
+  storage.close();
+});
+
+test("deletes terminal run records, traces, and artifacts", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(run.id);
+  storage.appendTrace({
+    runId: run.id,
+    at: "2026-01-01T00:00:01.000Z",
+    type: "error",
+    message: "x",
+  });
+  storage.finishRun(run.id, "failed", { code: "FAILURE", message: "x" });
+  const before = storage.changeToken();
+  await storage.deleteRun(run.id);
+  expect(storage.getRun(run.id)).toBeUndefined();
+  expect(storage.trace(run.id)).toEqual([]);
+  await expect(stat(run.files.directory)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(storage.changeToken().runCount).toBe(before.runCount - 1);
+
+  const pending = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  await expect(storage.deleteRun(pending.id)).rejects.toThrow("non-terminal");
+  storage.startRun(pending.id);
+  await expect(storage.deleteRun(pending.id)).rejects.toThrow("non-terminal");
+  storage.close();
+});
+
+test("deletes a terminal record when its artifact directory is already missing", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(run.id);
+  storage.finishRun(run.id, "succeeded");
+  await rm(run.files.directory, { recursive: true });
+  await storage.deleteRun(run.id);
+  expect(storage.getRun(run.id)).toBeUndefined();
   storage.close();
 });

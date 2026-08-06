@@ -53,6 +53,7 @@ export type ChangeToken = Readonly<{
   latestRunRowid: number;
   latestRunActivity: string;
   latestTraceRowid: number;
+  runCount: number;
 }>;
 export type PublicRun = Pick<Run, "id" | "status" | "startedAt" | "finishedAt" | "failure"> & {
   metadata?: { request?: string; agentName?: string };
@@ -303,6 +304,20 @@ export class WorkflowStorage {
     await atomic(record.files.result, JSON.stringify(result, null, 2) + "\n");
   }
 
+  /** Remove terminal runs only after their on-disk artifacts have been removed. */
+  async deleteRun(id: string) {
+    const run = this.getRun(id);
+    if (!run) throw Error(`Run not found: ${id}`);
+    if (!run.finishedAt) throw Error(`Cannot delete non-terminal run: ${id}`);
+    await rm(run.files.directory, { recursive: true, force: true });
+    const result = this.database
+      .query("DELETE FROM runs WHERE id=? AND finished_at IS NOT NULL")
+      .run(id);
+    // SQLite reports cascaded trace-event deletions in `changes`, so success is any positive value.
+    if (result.changes < 1) throw Error(`Run not found: ${id}`);
+    return run;
+  }
+
   getRun(id: string): RunRecord | undefined {
     const row = this.database.query<any, [string]>("SELECT * FROM runs WHERE id=?").get(id);
     if (!row) return undefined;
@@ -390,11 +405,20 @@ export class WorkflowStorage {
   /** Cheap database-only token for live UI polling. */
   changeToken(): ChangeToken {
     return this.database
-      .query<{ latestRunRowid: number; latestRunActivity: string; latestTraceRowid: number }, []>(
+      .query<
+        {
+          latestRunRowid: number;
+          latestRunActivity: string;
+          latestTraceRowid: number;
+          runCount: number;
+        },
+        []
+      >(
         `SELECT COALESCE((SELECT MAX(rowid) FROM runs), 0) AS latestRunRowid,
                 COALESCE((SELECT MAX(activity) FROM
                   (SELECT COALESCE(finished_at, started_at, '0') AS activity FROM runs)), '0') AS latestRunActivity,
-                COALESCE((SELECT MAX(id) FROM trace_events), 0) AS latestTraceRowid`,
+                 COALESCE((SELECT MAX(id) FROM trace_events), 0) AS latestTraceRowid,
+                 (SELECT COUNT(*) FROM runs) AS runCount`,
       )
       .get()!;
   }

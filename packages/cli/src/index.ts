@@ -562,6 +562,23 @@ workflowTrace.action(async (id: string, _, cmd) => {
     storage.close();
   }
 });
+const workflowDelete = jsonOption(
+  workflow
+    .command("delete")
+    .description("Permanently delete a completed run and its artifacts.")
+    .argument("<run-id>"),
+);
+workflowDelete.action(async (id: string, _, cmd) => {
+  const storage = await openWorkflowStorage(await projectRoot());
+  try {
+    const deleted = await storage.deleteRun(id);
+    output({ deleted: true, runId: deleted.id }, isJson(cmd));
+  } catch (error) {
+    emitWorkflowError(error instanceof Error ? error.message : String(error), isJson(cmd));
+  } finally {
+    storage.close();
+  }
+});
 const workflowStop = jsonOption(
   workflow
     .command("stop")

@@ -122,6 +122,25 @@ test("workflow CLI accepts stdout result and emits one JSON envelope", async () 
   );
 });
 
+test("workflow CLI deletes terminal run artifacts and rejects active runs", async () => {
+  const p = await repo(await fakeScript(resultSource()));
+  const completed = JSON.parse(
+    (await run(p.dir, ["workflow", "run", "--agent", "scout", "hello", "--json"], p.env)).stdout,
+  ).run;
+  const deleted = await run(p.dir, ["workflow", "delete", completed.id, "--json"], p.env);
+  expect(deleted.code).toBe(0);
+  expect(JSON.parse(deleted.stdout)).toEqual({ deleted: true, runId: completed.id });
+  expect(await Bun.file(completed.files.directory).exists()).toBe(false);
+
+  const storage = await openWorkflowStorage(p.dir);
+  const active = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(active.id);
+  storage.close();
+  const rejected = await run(p.dir, ["workflow", "delete", active.id, "--json"], p.env);
+  expect(rejected.code).toBe(1);
+  expect(JSON.parse(rejected.stdout).error).toMatchObject({ code: "WORKFLOW_ERROR" });
+});
+
 test("workflow CLI uses stdin and rejects stderr-only sentinel", async () => {
   const fake = join(await mkdtemp(join(tmpdir(), "factory-fake-")), "fake.js");
   await writeFile(
@@ -372,6 +391,7 @@ test("workflow CLI acceptance matrix has one envelope and persisted truth", asyn
     ["empty input", ["workflow", "run", "--agent", "scout", "--json"]],
     ["missing status", ["workflow", "status", "run_missing", "--json"]],
     ["missing trace", ["workflow", "trace", "run_missing", "--json"]],
+    ["missing delete", ["workflow", "delete", "run_missing", "--json"]],
     ["missing stop", ["workflow", "stop", "run_missing", "--json"]],
   ] as const) {
     const r = await run(
@@ -408,6 +428,7 @@ test("workflow setup and commander failures use the JSON workflow envelope", asy
     ["workflow", "run", "--agent", "scout", "x", "--json"],
     ["workflow", "status", "missing", "--json"],
     ["workflow", "trace", "missing", "--json"],
+    ["workflow", "delete", "missing", "--json"],
     ["workflow", "stop", "missing", "--json"],
     ["workflow", "run", "x", "--json"],
   ]) {

@@ -75,6 +75,22 @@ export async function startUiServer(options: UiServerOptions) {
           });
           return json({ ...page, runs: page.runs.map(publicRun).filter(Boolean) });
         }
+        const deleteMatch = path.match(/^\/api\/(?:sessions|runs)\/([^/]+)$/);
+        if (request.method === "DELETE" && deleteMatch) {
+          const runId = decodeURIComponent(deleteMatch[1]!);
+          try {
+            await storage.deleteRun(runId);
+            return json({ deleted: true, runId });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const status = message.includes("not found")
+              ? 404
+              : message.includes("non-terminal")
+                ? 409
+                : 500;
+            return json({ error: message }, status);
+          }
+        }
         const traceMatch = path.match(/^\/api\/(?:sessions|runs)\/([^/]+)\/trace$/);
         if (traceMatch) {
           const runId = decodeURIComponent(traceMatch[1]!);

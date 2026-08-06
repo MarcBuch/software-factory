@@ -22,6 +22,8 @@ Inspect or control a run with:
 factory workflow status <run-id>
 factory workflow trace <run-id>
 factory workflow stop <run-id>
+
+factory workflow delete <run-id>
 ```
 
 Add `--json` to any workflow command. For `workflow run` and `workflow stop`, terminal output uses an envelope with `accepted` and the persisted `run` (and, when available, `result`); a successful terminal run has `accepted: true`, status `succeeded`, and exit code 0. Failed, cancelled/stopped, invalid-output, backend, boundary, and command errors have `accepted: false` and exit code 1. Successful `workflow status` output is a `{ "run": ..., "summary": ... }` object, while successful `workflow trace` output is a `{ "run": ..., "runId": ..., "events": ..., "rawPath": ... }` object; these are not the terminal envelope. Diagnostics are not mixed into JSON stdout. Normal mode is human-readable and may print a progress line on stderr.
@@ -39,7 +41,7 @@ The agent must return one structured result between the exact markers `---FACTOR
 
 `status` is `success` or `failure`; artifact paths are repository-relative. The result is persisted only after schema validation. Every nonempty backend stdout/stderr stream record is written as a JSON object to the raw JSONL stream (the record includes the stream and raw content; it is not a verbatim line file). Recognized useful events are normalized into SQLite trace events; unknown JSON remains raw-only.
 
-Workflow runtime data is under `.factory/runs/<run-id>/` (prompts, `result.json`, `metadata.json`, and `stream.jsonl`) and `.factory/workflow.sqlite` (run records and normalized trace events). While active, run records persist the backend PID and process identity; these are cleared terminally. The OpenCode session ID remains persisted for future continuation when available. `trace` reads the normalized SQLite events and reports the raw stream path. `stop` verifies the persisted process identity before sending `SIGTERM`; stale or unverifiable PIDs are refused. There is no workflow timeout: a run continues until the backend exits or it is stopped.
+Workflow runtime data is under `.factory/runs/<run-id>/` (prompts, `result.json`, `metadata.json`, and `stream.jsonl`) and `.factory/workflow.sqlite` (run records and normalized trace events). While active, run records persist the backend PID and process identity; these are cleared terminally. The OpenCode session ID remains persisted for future continuation when available. `trace` reads the normalized SQLite events and reports the raw stream path. `stop` verifies the persisted process identity before sending `SIGTERM`; stale or unverifiable PIDs are refused. `delete` permanently removes a terminal run, its trace events, and artifacts; pending or running runs are refused. This is a terminal/CLI-only command (the web UI exposes the local deletion API). There is no workflow timeout: a run continues until the backend exits or it is stopped.
 
 Before execution, the generic workflow harness snapshots the Git worktree and compares/restores it afterward. Runtime paths under `.factory` are exempt from worktree path comparison, but staging/index mutations still violate the boundary. The worktree must not have pre-existing untracked files outside that runtime directory; an exclusive-access assumption is required because concurrent edits or untracked-file changes can be rejected or complicate restoration. This is a boundary check, not a security guarantee.
 

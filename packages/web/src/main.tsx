@@ -1,4 +1,4 @@
-import { ArrowLeft, Radio } from "lucide-react";
+import { ArrowLeft, Radio, Trash2 } from "lucide-react";
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 
 import "./styles.css";
@@ -6,6 +6,17 @@ import { createRoot } from "react-dom/client";
 
 import { ModeToggle } from "@/components/mode-toggle";
 import { ThemeProvider } from "@/components/theme-provider";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -59,9 +70,13 @@ type TracePage = {
   hasMore: boolean;
   summary: TraceSummary;
 };
-const api = async <T,>(path: string, signal?: AbortSignal): Promise<T> => {
-  const r = await fetch(path, { signal });
-  if (!r.ok) throw Error(await r.text());
+const api = async <T,>(path: string, signal?: AbortSignal, method = "GET"): Promise<T> => {
+  const r = await fetch(path, { signal, method });
+  if (!r.ok) {
+    const error = Error(await r.text()) as Error & { status: number };
+    error.status = r.status;
+    throw error;
+  }
   return r.json();
 };
 const date = (v?: string) =>
@@ -197,7 +212,13 @@ function App() {
       if (p.nextCursor !== undefined) setTraceCursor(p.nextCursor);
       setHasMore(p.hasMore);
     } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError")) setError(String(e));
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (e instanceof Error && (e as Error & { status?: number }).status === 404) {
+        setRuns((current) => current.filter((run) => run.id !== id));
+        setSelected((current) => (current === id ? undefined : current));
+        return;
+      }
+      setError(String(e));
     } finally {
       if (request.controller === controller) {
         request.inFlight = false;
@@ -258,6 +279,21 @@ function App() {
     loadTrace(selected);
   }, [selected]);
   const run = runs.find((x) => x.id === selected);
+  const [deleting, setDeleting] = useState(false);
+  const deleteSelected = async () => {
+    if (!selected) return;
+    setDeleting(true);
+    try {
+      await api(`/api/sessions/${encodeURIComponent(selected)}`, undefined, "DELETE");
+      setRuns((current) => current.filter((item) => item.id !== selected));
+      setSelected(undefined);
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDeleting(false);
+    }
+  };
   const agents = useMemo(
     () => Array.from(new Set(trace.map((e) => e.agentName).filter(Boolean) as string[])),
     [trace],
@@ -294,6 +330,8 @@ function App() {
             onBack={() => setSelected(undefined)}
             onMore={() => loadTrace(selected, traceCursor)}
             hasMore={hasMore}
+            deleting={deleting}
+            onDelete={deleteSelected}
           />
         ) : (
           <List
@@ -387,6 +425,8 @@ function Detail({
   onBack,
   onMore,
   hasMore,
+  deleting,
+  onDelete,
 }: {
   run: Run;
   trace: Event[];
@@ -395,6 +435,8 @@ function Detail({
   onBack: () => void;
   onMore: () => void;
   hasMore: boolean;
+  deleting: boolean;
+  onDelete: () => void;
 }) {
   const [agent, setAgent] = useState<string>();
   useEffect(() => {
@@ -424,17 +466,41 @@ function Detail({
           <h1>{String((run.metadata as { request?: string })?.request || run.id)}</h1>
           <code>{run.id}</code>
         </div>
-        <Badge
-          variant={
-            run.status === "failed"
-              ? "destructive"
-              : run.status === "succeeded"
-                ? "default"
-                : "secondary"
-          }
-        >
-          {run.status}
-        </Badge>
+        <div className="header-actions">
+          <Badge
+            variant={
+              run.status === "failed"
+                ? "destructive"
+                : run.status === "succeeded"
+                  ? "default"
+                  : "secondary"
+            }
+          >
+            {run.status}
+          </Badge>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive" disabled={deleting}>
+                <Trash2 /> Delete session
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this session?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This permanently removes the session trace and its stored artifacts. This action
+                  cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+                <AlertDialogAction variant="destructive" disabled={deleting} onClick={onDelete}>
+                  <Trash2 /> {deleting ? "Deleting…" : "Delete session"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       </section>
       <div className="metrics">
         <Metric label="DURATION" value={duration(run.startedAt, run.finishedAt)} />
