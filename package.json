@@ -13,8 +13,16 @@
     "lint": "oxlint packages/cli/src",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run build"
   },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.28.0",
+    "tailwind-merge": "^3.6.0"
+  },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "oxfmt": "0.62.0",
-    "oxlint": "1.77.0"
+    "oxlint": "1.77.0",
+    "tailwindcss": "^4.3.3"
   }
 }

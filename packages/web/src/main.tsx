@@ -1,7 +1,15 @@
+import { ArrowLeft, Radio } from "lucide-react";
 import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
 
 import "./styles.css";
+import { createRoot } from "react-dom/client";
+
+import { ModeToggle } from "@/components/mode-toggle";
+import { ThemeProvider } from "@/components/theme-provider";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
 
 type Run = {
   id: string;
@@ -230,18 +238,25 @@ function App() {
     <div className="shell">
       <header>
         <div className="brand">
-          <span className="mark">◈</span>
+          <Radio className="mark" size={20} />
           <div>
             <strong>WORKFLOW</strong>
             <small>SESSION TRACE</small>
           </div>
         </div>
-        <div className="live">
-          <i /> LIVE MONITOR
+        <div className="header-actions">
+          <div className="live">
+            <i /> LIVE MONITOR
+          </div>
+          <ModeToggle />
         </div>
       </header>
       <main>
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error" role="alert">
+            {error}
+          </div>
+        )}
         {selected && run ? (
           <Detail
             run={run}
@@ -295,27 +310,42 @@ function List({
       </div>
       <div className="cards">
         {runs.map((r) => (
-          <button className="card" key={r.id} onClick={() => onSelect(r.id)}>
-            <div className="card-top">
-              <span className={`pill ${r.status}`}>{r.status}</span>
-              <time>{date(r.startedAt)}</time>
-            </div>
-            <h3>{String((r.metadata as { request?: string })?.request || r.id)}</h3>
-            <code>{r.id}</code>
-            <div className="card-foot">
-              <span>{duration(r.startedAt, r.finishedAt)}</span>
-              <span>
-                View trace <b>↗</b>
-              </span>
-            </div>
-          </button>
+          <Card className="card" key={r.id}>
+            <CardContent>
+              <button className="card-button" onClick={() => onSelect(r.id)}>
+                <div className="card-top">
+                  <Badge
+                    variant={
+                      r.status === "failed"
+                        ? "destructive"
+                        : r.status === "succeeded"
+                          ? "default"
+                          : "secondary"
+                    }
+                  >
+                    {r.status}
+                  </Badge>
+                  <time>{date(r.startedAt)}</time>
+                </div>
+                <h3>{String((r.metadata as { request?: string })?.request || r.id)}</h3>
+                <code>{r.id}</code>
+                <Separator />
+                <div className="card-foot">
+                  <span>{duration(r.startedAt, r.finishedAt)}</span>
+                  <span>
+                    View trace <b>↗</b>
+                  </span>
+                </div>
+              </button>
+            </CardContent>
+          </Card>
         ))}
         {!runs.length && <div className="empty">No sessions recorded yet.</div>}
       </div>
       {hasMore && (
-        <button className="more" onClick={onMore}>
+        <Button className="more" variant="outline" onClick={onMore}>
           Load more sessions
-        </button>
+        </Button>
       )}
     </>
   );
@@ -351,16 +381,26 @@ function Detail({
   );
   return (
     <>
-      <button className="back" onClick={onBack}>
-        ← All sessions
-      </button>
+      <Button className="back" variant="ghost" onClick={onBack}>
+        <ArrowLeft /> All sessions
+      </Button>
       <section className="detail-head">
         <div>
           <p className="eyebrow">SESSION TRACE</p>
           <h1>{String((run.metadata as { request?: string })?.request || run.id)}</h1>
           <code>{run.id}</code>
         </div>
-        <span className={`pill ${run.status}`}>{run.status}</span>
+        <Badge
+          variant={
+            run.status === "failed"
+              ? "destructive"
+              : run.status === "succeeded"
+                ? "default"
+                : "secondary"
+          }
+        >
+          {run.status}
+        </Badge>
       </section>
       <div className="metrics">
         <Metric label="DURATION" value={duration(run.startedAt, run.finishedAt)} />
@@ -368,70 +408,77 @@ function Detail({
         <Metric label="COST" value={`${usage.cost.toFixed(4)} USD`} />
         <Metric label="EVENTS" value={trace.length.toString()} />
       </div>
-      <section className="panel">
-        <div className="panel-head">
-          <h2>Agent timeline</h2>
-          <span>{agents.length} agents</span>
-        </div>
-        <div className="gantt">
-          {agents.map((a, i) => (
-            <button
-              className={`agent ${a === agent ? "chosen" : ""}`}
-              key={a}
-              onClick={() => setAgent(a)}
-            >
-              <span>{a}</span>
-              <div className="bar">
-                <i style={{ left: `${i * 7}%`, width: `${Math.max(18, 75 - i * 8)}%` }} />
-              </div>
-              <small>{trace.filter((e) => e.agentName === a).length} events</small>
-            </button>
-          ))}
-        </div>
-      </section>
-      <section className="panel events">
-        <div className="panel-head">
-          <h2>{agent || "All"} events</h2>
-          <span>CHRONOLOGICAL</span>
-        </div>
-        {selected.map((e, i) => (
-          <article className="event" key={`${e.at}-${i}`}>
-            <div className="dot" />
-            <div className="event-main">
-              <div className="event-title">
-                <b>{e.type.replaceAll("_", " ")}</b>
-                <time>{date(e.at)}</time>
-              </div>
-              {e.tool && <strong className="tool">{e.tool}</strong>}
-              {e.message && <p>{e.message}</p>}
-              {e.result?.summary && <p>{e.result.summary}</p>}
-              {(e.input !== undefined || e.output !== undefined) && (
-                <div className="io">
-                  <details>
-                    <summary>Input</summary>
-                    <pre>{json(e.input)}</pre>
-                  </details>
-                  <details>
-                    <summary>Output</summary>
-                    <pre>{json(e.output)}</pre>
-                  </details>
+      <Card className="panel">
+        <CardContent>
+          <div className="panel-head">
+            <h2>Agent timeline</h2>
+            <span>{agents.length} agents</span>
+          </div>
+          <Separator />
+          <div className="gantt">
+            {agents.map((a, i) => (
+              <Button
+                variant={a === agent ? "secondary" : "ghost"}
+                className={`agent ${a === agent ? "chosen" : ""}`}
+                key={a}
+                onClick={() => setAgent(a)}
+              >
+                <span>{a}</span>
+                <div className="bar">
+                  <i style={{ left: `${i * 7}%`, width: `${Math.max(18, 75 - i * 8)}%` }} />
                 </div>
-              )}
-              {e.usage && (
-                <small className="usage">
-                  {e.usage.input} in · {e.usage.output} out{" "}
-                  {e.cost ? ` · ${e.cost.amount} ${e.cost.currency}` : ""}
-                </small>
-              )}
-            </div>
-          </article>
-        ))}
-        {hasMore && (
-          <button className="more" onClick={onMore}>
-            Load more events
-          </button>
-        )}
-      </section>
+                <small>{trace.filter((e) => e.agentName === a).length} events</small>
+              </Button>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+      <Card className="panel events">
+        <CardContent>
+          <div className="panel-head">
+            <h2>{agent || "All"} events</h2>
+            <span>CHRONOLOGICAL</span>
+          </div>
+          <Separator />
+          {selected.map((e, i) => (
+            <article className="event" key={`${e.at}-${i}`}>
+              <div className="dot" />
+              <div className="event-main">
+                <div className="event-title">
+                  <b>{e.type.replaceAll("_", " ")}</b>
+                  <time>{date(e.at)}</time>
+                </div>
+                {e.tool && <strong className="tool">{e.tool}</strong>}
+                {e.message && <p>{e.message}</p>}
+                {e.result?.summary && <p>{e.result.summary}</p>}
+                {(e.input !== undefined || e.output !== undefined) && (
+                  <div className="io">
+                    <details>
+                      <summary>Input</summary>
+                      <pre>{json(e.input)}</pre>
+                    </details>
+                    <details>
+                      <summary>Output</summary>
+                      <pre>{json(e.output)}</pre>
+                    </details>
+                  </div>
+                )}
+                {e.usage && (
+                  <small className="usage">
+                    {e.usage.input} in · {e.usage.output} out{" "}
+                    {e.cost ? ` · ${e.cost.amount} ${e.cost.currency}` : ""}
+                  </small>
+                )}
+              </div>
+            </article>
+          ))}
+          {hasMore && (
+            <Button className="more" variant="outline" onClick={onMore}>
+              Load more events
+            </Button>
+          )}
+        </CardContent>
+      </Card>
     </>
   );
 }
@@ -445,6 +492,8 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>
   </StrictMode>,
 );
