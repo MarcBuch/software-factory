@@ -1,5 +1,5 @@
-import { useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Radio, Trash2 } from "lucide-react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { ArrowLeft, FolderKanban, Radio, Trash2, Workflow } from "lucide-react";
 import {
   createContext,
   useContext,
@@ -28,6 +28,19 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarInset,
+  SidebarTrigger,
+} from "@/components/ui/sidebar";
 import { Textarea } from "@/components/ui/textarea";
 
 type Run = {
@@ -439,31 +452,80 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 export function App({ children }: { children: ReactNode }) {
   const { error } = useWorkflow();
   return (
-    <div className="shell">
-      <header>
-        <div className="brand">
-          <Radio className="mark" size={20} />
-          <div>
-            <strong>WORKFLOW</strong>
-            <small>SESSION TRACE</small>
+    <SidebarProvider>
+      <Sidebar collapsible="icon">
+        <div className="flex h-full flex-col">
+          <div className="p-2">
+            <div className="brand px-2 py-2">
+              <Radio className="mark" size={20} />
+              <div>
+                <strong>WORKFLOW</strong>
+                <small>SESSION TRACE</small>
+              </div>
+            </div>
+          </div>
+          <SidebarContent>
+            <SidebarGroup>
+              <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild tooltip="Workspace">
+                      <Link
+                        to="/workspace"
+                        activeOptions={{ exact: true }}
+                        activeProps={{ "data-active": true }}
+                      >
+                        <FolderKanban />
+                        <span>Workspace</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton asChild tooltip="Runs">
+                      <Link to="/runs" activeProps={{ "data-active": true }}>
+                        <Workflow />
+                        <span>Runs</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+        </div>
+      </Sidebar>
+      <SidebarInset>
+        <header>
+          <div className="header-leading">
+            <SidebarTrigger />
+            <div className="brand">
+              <Radio className="mark" size={20} />
+              <div>
+                <strong>WORKFLOW</strong>
+                <small>SESSION TRACE</small>
+              </div>
+            </div>
+          </div>
+          <div className="header-actions">
+            <div className="live">
+              <i /> LIVE MONITOR
+            </div>
+            <ModeToggle />
+          </div>
+        </header>
+        <div className="app-scroll">
+          <div className="app-content">
+            {error && (
+              <div className="error" role="alert">
+                {error}
+              </div>
+            )}
+            {children}
           </div>
         </div>
-        <div className="header-actions">
-          <div className="live">
-            <i /> LIVE MONITOR
-          </div>
-          <ModeToggle />
-        </div>
-      </header>
-      <main>
-        {error && (
-          <div className="error" role="alert">
-            {error}
-          </div>
-        )}
-        {children}
-      </main>
-    </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
 export function List({
