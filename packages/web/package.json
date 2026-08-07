@@ -11,6 +11,8 @@
   "dependencies": {
     "@radix-ui/react-separator": "latest",
     "@radix-ui/react-slot": "latest",
+    "@tanstack/react-router": "^1.170.22",
+    "@tanstack/router-plugin": "^1.168.27",
     "@vitejs/plugin-react": "latest",
     "radix-ui": "^1.6.7",
     "react": "latest",

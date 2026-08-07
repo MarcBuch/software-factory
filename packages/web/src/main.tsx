@@ -1,9 +1,7 @@
 import { ArrowLeft, Radio, Trash2 } from "lucide-react";
-import { StrictMode, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import "./styles.css";
-import { createRoot } from "react-dom/client";
-
 import { ModeToggle } from "@/components/mode-toggle";
 import { ThemeProvider } from "@/components/theme-provider";
 import {
@@ -131,7 +129,7 @@ const duration = (a?: string, b?: string) =>
   a ? `${Math.max(0, ((b ? Date.parse(b) : Date.now()) - Date.parse(a)) / 1000).toFixed(1)}s` : "—";
 const json = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 
-function App() {
+export function App() {
   const [runs, setRuns] = useState<Run[]>([]),
     [cursor, setCursor] = useState<number>(),
     [selected, setSelected] = useState<string>(),
@@ -706,10 +704,3 @@ function Metric({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <ThemeProvider>
-      <App />
-    </ThemeProvider>
-  </StrictMode>,
-);

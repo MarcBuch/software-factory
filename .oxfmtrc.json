@@ -8,5 +8,5 @@
   "trailingComma": "all",
   "sortImports": true,
   "sortPackageJson": true,
-  "ignorePatterns": ["packages/cli/ui/dist/**"]
+  "ignorePatterns": ["packages/cli/ui/dist/**", "packages/web/src/routeTree.gen.ts"]
 }
