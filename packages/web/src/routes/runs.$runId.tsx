@@ -1,7 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
-import { Detail, Unavailable, useWorkflow } from "@/main";
+import { Detail, Unavailable } from "@/components/runs/run-detail";
+import { useWorkflow } from "@/workflow/workflow-context";
 
 export const Route = createFileRoute("/runs/$runId")({
   component: () => {
