@@ -18,10 +18,19 @@ commits, retries, or handoffs in the result or perform those activities.`;
 const PLANNER_RESULT_INSTRUCTIONS = `Return only one result between the exact markers
 ${FACTORY_RESULT_START} and ${FACTORY_RESULT_END}. The content must be a
 JSON object matching this schema: {"status":"success"|"failure","summary":string,
-"artifacts":[{"path":string,"kind":string,"description":string}],"notes":[string]}.
-Put the complete plan in summary and the Factory plan input in plan. The workflow
-creates one draft and appends its pln_ ID. Do not approve, materialize, revise,
-archive, create missions, run commands or tests, make commits, retry, or hand off work.`;
+"artifacts":[{"path":string,"kind":string,"description":string}],"notes":[string],
+"plan":{"missionTitle":string,"verificationMode":"fast"|"standard"|"exhaustive",
+"sections":{"context":string,"intent":string,"approach":string,"executionDesign":string,
+"implementationDetails":string,"alternatives":[{"name":string,"rejectedBecause":string}],
+"risks":[{"description":string,"mitigation":string}],"acceptance":[string]},
+"milestones":[{"key":string,"title":string}],"steps":[{"key":string,"milestoneKey":string,
+"title":string,"type":"implementation"|"verification","risk":"low"|"medium"|"high",
+"verification":string,"dependsOn":[string],"executionNotes"?:string,"inputs"?:[string],
+"invariants"?:[string],"outcomes"?:[string]}]}}.
+For a successful result, plan is required and must contain the complete Factory plan input.
+Put the complete readable plan in summary. The workflow creates one draft and appends its pln_ ID.
+Do not approve, materialize, revise, archive, create missions, run commands or tests, make commits,
+retry, or hand off work.`;
 
 export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "scout",

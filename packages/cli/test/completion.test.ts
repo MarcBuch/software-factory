@@ -155,3 +155,58 @@ test("completion accepts direct assistant results and preserves direct agent fai
     ).kind,
   ).toBe("agent_failure");
 });
+
+test("completion reports invalid planner result fields", () => {
+  const event = {
+    stream: "stdout" as const,
+    raw: JSON.stringify({
+      role: "assistant",
+      content:
+        '---FACTORY_RESULT_JSON---\n{"status":"success","summary":"Plan","artifacts":[],"notes":[],"plan":{"title":"Wrong key"}}\n---END_FACTORY_RESULT_JSON---',
+    }),
+  };
+  expect(parseFinalAssistantResult([event])).toEqual({
+    ok: false,
+    reason: expect.stringContaining("plan.missionTitle"),
+  });
+});
+
+test("completion accepts a complete planner plan input", () => {
+  const plan = {
+    missionTitle: "Notifications",
+    verificationMode: "fast" as const,
+    sections: {
+      context: "Context",
+      intent: "Intent",
+      approach: "Approach",
+      executionDesign: "Design",
+      implementationDetails: "Details",
+      alternatives: [],
+      risks: [],
+      acceptance: ["Accepted"],
+    },
+    milestones: [{ key: "m1", title: "Notifications" }],
+    steps: [
+      {
+        key: "m1t1",
+        milestoneKey: "m1",
+        title: "Implement notifications",
+        type: "implementation" as const,
+        risk: "low" as const,
+        verification: "Run focused test",
+        dependsOn: [],
+      },
+    ],
+  };
+  const event = {
+    stream: "stdout" as const,
+    raw: JSON.stringify({
+      role: "assistant",
+      content: `---FACTORY_RESULT_JSON---\n${JSON.stringify({ status: "success", summary: "Plan", artifacts: [], notes: [], plan })}\n---END_FACTORY_RESULT_JSON---`,
+    }),
+  };
+  expect(parseFinalAssistantResult([event])).toEqual({
+    ok: true,
+    result: { status: "success", summary: "Plan", artifacts: [], notes: [], plan },
+  });
+});

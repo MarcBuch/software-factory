@@ -113,7 +113,13 @@ export function parseFinalAssistantResult(events: readonly BackendEvent[]): Pars
   const result = FactoryFinalResultSchema.safeParse(value);
   return result.success
     ? { ok: true, result: result.data }
-    : { ok: false, reason: "schema-invalid result" };
+    : {
+        ok: false,
+        reason: `schema-invalid result: ${result.error.issues
+          .slice(0, 3)
+          .map((issue) => `${issue.path.join(".") || "result"}: ${issue.message}`)
+          .join("; ")}`,
+      };
 }
 
 async function runProcess(

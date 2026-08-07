@@ -161,6 +161,8 @@ test("planner roster renders a delegated, workflow-persisted draft plan prompt",
   expect(rendered.systemPrompt).toContain("Factory plan input in the result plan field");
   expect(rendered.systemPrompt).toContain("workflow validates and persists exactly one draft");
   expect(rendered.systemPrompt).toContain("appends its pln_ ID");
+  expect(rendered.systemPrompt).toContain('"plan":{"missionTitle":string');
+  expect(rendered.systemPrompt).toContain("For a successful result, plan is required");
   expect(rendered.systemPrompt).toContain("Do not approve, materialize, revise, archive");
   expect(rendered.systemPrompt).not.toContain("Do not include planning");
   expect(rendered.userPrompt).toContain("let the workflow create the draft");
