@@ -126,6 +126,33 @@ test("adapter reports nested OpenCode error messages without forwarding roster n
   });
 });
 
+test("adapter normalizes completed OpenCode tool_use state as a finished span", async () => {
+  const adapter = new OpenCodeAdapter({
+    executable: "fake",
+    spawn() {
+      return {
+        pid: 3,
+        stdout: stream([
+          '{"type":"tool_use","part":{"tool":"task","callID":"explore","state":{"status":"completed","input":{"subagent_type":"codebase-explorer"},"output":"exploration findings"}}}\n',
+        ]),
+        stderr: stream([]),
+        exited: Promise.resolve(0),
+      };
+    },
+  });
+  const process = adapter.start({ repositoryRoot: "/repo", runId: "r", agent, prompt: "x" });
+  const events = [];
+  for await (const event of process) events.push(event);
+  expect(events[0]?.normalized).toMatchObject({
+    type: "tool_call",
+    tool: "task",
+    spanId: "explore",
+    phase: "finish",
+    input: { subagent_type: "codebase-explorer" },
+    output: { status: "completed", value: "exploration findings" },
+  });
+});
+
 test("continuation uses the captured OpenCode session", async () => {
   const commands: (readonly string[])[] = [];
   const adapter = new OpenCodeAdapter({

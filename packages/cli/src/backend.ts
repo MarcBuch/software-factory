@@ -79,28 +79,42 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
   const name = typeof event.agent === "string" ? event.agent : "opencode";
   let candidate: Record<string, unknown> | undefined;
   const type = String(event.type ?? "").toLowerCase();
+  const part =
+    event.part && typeof event.part === "object" ? (event.part as Record<string, any>) : {};
+  const state =
+    part.state && typeof part.state === "object" ? (part.state as Record<string, any>) : {};
+  const stateStatus = typeof state.status === "string" ? state.status.toLowerCase() : undefined;
+  const actualToolCompleted =
+    type === "tool_use" && ["completed", "success"].includes(stateStatus ?? "");
+  const spanId =
+    event.callID ?? event.callId ?? event.toolCallId ?? event.id ?? part.callID ?? part.callId;
+  const stateOutput = actualToolCompleted
+    ? state.output && typeof state.output === "object"
+      ? { ...state.output, status: state.output.status ?? stateStatus }
+      : { status: stateStatus, value: state.output }
+    : undefined;
   if (type === "tool_use" || type === "tool_call" || type === "tool_start")
     candidate = {
       ...base,
       type: "tool_call",
       agentName: name,
-      tool: String(event.tool ?? event.name ?? event.part?.tool ?? "tool"),
-      input: event.input ?? event.part?.state?.input,
-      ...(typeof (event.callID ?? event.callId ?? event.toolCallId ?? event.id) === "string"
-        ? { spanId: event.callID ?? event.callId ?? event.toolCallId ?? event.id }
-        : {}),
-      ...(type === "tool_start" || type === "tool_use" ? { phase: "start" } : {}),
+      tool: String(event.tool ?? event.name ?? part.tool ?? "tool"),
+      input: event.input ?? state.input,
+      ...(typeof spanId === "string" ? { spanId } : {}),
+      ...(actualToolCompleted
+        ? { output: stateOutput, phase: "finish" as const }
+        : type === "tool_start" || type === "tool_use"
+          ? { phase: "start" as const }
+          : {}),
     };
   else if (type === "tool_result" || type === "tool_end")
     candidate = {
       ...base,
       type: "tool_call",
       agentName: name,
-      tool: String(event.tool ?? event.name ?? event.part?.tool ?? "tool"),
-      output: event.output ?? event.part?.state?.output,
-      ...(typeof (event.callID ?? event.callId ?? event.toolCallId ?? event.id) === "string"
-        ? { spanId: event.callID ?? event.callId ?? event.toolCallId ?? event.id }
-        : {}),
+      tool: String(event.tool ?? event.name ?? part.tool ?? "tool"),
+      output: event.output ?? state.output,
+      ...(typeof spanId === "string" ? { spanId } : {}),
       phase: "finish",
     };
   else if (type === "error") {

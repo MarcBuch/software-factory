@@ -158,7 +158,7 @@ test("workflow CLI invokes the planner roster entry", async () => {
     plan,
   });
   const fake = await fakeScript(
-    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); console.log(JSON.stringify({type:"tool_use",tool:"task",callID:"explore",input:{subagent_type:"codebase-explorer"}})); console.log(JSON.stringify({type:"tool_result",tool:"task",callID:"explore",output:{status:"success"}})); const content=["---FACTORY_RESULT_JSON---",${JSON.stringify(plannerResult)},"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"exploration findings"}}})); const content=["---FACTORY_RESULT_JSON---",${JSON.stringify(plannerResult)},"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
   );
   const p = await repo(fake);
   const result = await run(
@@ -204,7 +204,7 @@ test("planner refuses to persist a draft without codebase exploration", async ()
 test("planner refuses a failed codebase exploration", async () => {
   const p = await repo(
     await fakeScript(
-      `console.log(JSON.stringify({type:"tool_use",tool:"task",callID:"explore",input:{subagent_type:"codebase-explorer"}})); console.log(JSON.stringify({type:"tool_result",tool:"task",callID:"explore",output:{status:"failure"}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",sections:{context:"Context",intent:"Intent",approach:"Approach",executionDesign:"Design",implementationDetails:"Details",alternatives:[],risks:[],acceptance:["Accepted"]},milestones:[{key:"m1",title:"Plan"}],steps:[{key:"m1t1",milestoneKey:"m1",title:"Implement",type:"implementation",risk:"low",verification:"Check",dependsOn:[]}]}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"error",input:{subagent_type:"codebase-explorer"},output:"exploration failed"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",sections:{context:"Context",intent:"Intent",approach:"Approach",executionDesign:"Design",implementationDetails:"Details",alternatives:[],risks:[],acceptance:["Accepted"]},milestones:[{key:"m1",title:"Plan"}],steps:[{key:"m1t1",milestoneKey:"m1",title:"Implement",type:"implementation",risk:"low",verification:"Check",dependsOn:[]}]}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   const result = await run(

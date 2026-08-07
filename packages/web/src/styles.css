@@ -256,6 +256,12 @@ main {
 .detail-head {
   align-items: center;
 }
+.failure-message {
+  max-width: 360px;
+  margin: 0;
+  color: var(--destructive);
+  font-size: 12px;
+}
 .metrics {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

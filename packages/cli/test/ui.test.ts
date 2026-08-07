@@ -115,7 +115,10 @@ test("UI session launch API validates input and returns accepted runs", async ()
       body: JSON.stringify({ request: "failed", agentName: "scout" }),
     });
     expect(failedResponse.status).toBe(500);
-    expect(await failedResponse.json()).toMatchObject({ accepted: false, run: { id: failed.id } });
+    expect(await failedResponse.json()).toMatchObject({
+      accepted: false,
+      run: { id: failed.id, failure: { message: "missing" } },
+    });
 
     const unsupported = await fetch(new URL("/api/runs", ui.url), { method: "POST" });
     expect(unsupported.status).toBe(404);

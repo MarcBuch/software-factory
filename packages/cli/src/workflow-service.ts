@@ -129,10 +129,15 @@ function delegatedExplorer(outcome: WorkflowOutcome) {
       starts.add(normalized.spanId);
     if (
       normalized.phase === "finish" &&
-      starts.has(normalized.spanId) &&
       normalized.output &&
       typeof normalized.output === "object" &&
-      (normalized.output as Record<string, unknown>).status === "success"
+      ["completed", "success"].includes(
+        String((normalized.output as Record<string, unknown>).status ?? "").toLowerCase(),
+      ) &&
+      (starts.has(normalized.spanId) ||
+        (normalized.input &&
+          typeof normalized.input === "object" &&
+          (normalized.input as Record<string, unknown>).subagent_type === "codebase-explorer"))
     )
       return true;
   }

@@ -1,6 +1,6 @@
 ---
 description: Planning subagent that explores a repository and persists one non-executable draft plan.
-mode: subagent
+mode: primary
 model: github-copilot/gpt-5.6-terra
 temperature: 0.1
 permission:

@@ -589,6 +589,7 @@ function Detail({
           >
             {run.status}
           </Badge>
+          {run.failure?.message && <p className="failure-message">{run.failure.message}</p>}
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button variant="destructive" disabled={deleting}>
