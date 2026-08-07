@@ -1,9 +1,18 @@
+import { useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Radio, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
 import "./styles.css";
 import { ModeToggle } from "@/components/mode-toggle";
-import { ThemeProvider } from "@/components/theme-provider";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -68,6 +77,7 @@ type TracePage = {
   nextCursor?: number;
   hasMore: boolean;
   summary: TraceSummary;
+  publicRun?: Run;
 };
 type LaunchResponse = { accepted: true; run: Run };
 type LaunchAgent = "scout" | "planner";
@@ -129,16 +139,46 @@ const duration = (a?: string, b?: string) =>
   a ? `${Math.max(0, ((b ? Date.parse(b) : Date.now()) - Date.parse(a)) / 1000).toFixed(1)}s` : "—";
 const json = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 
-export function App() {
+type WorkflowState = {
+  runs: Run[];
+  cursor?: number;
+  trace: Event[];
+  traceRunId?: string;
+  traceCursor?: number;
+  hasMore: boolean;
+  traceSummary?: TraceSummary;
+  error: string;
+  launching: boolean;
+  deleting: boolean;
+  unavailable: boolean;
+  selected?: string;
+  run?: Run;
+  load: (before?: number) => void;
+  loadTrace: (id: string, after?: number) => void;
+  launch: (request: string, agentName: LaunchAgent) => Promise<void>;
+  deleteSelected: () => Promise<void>;
+  setSelected: (id?: string) => void;
+};
+const WorkflowContext = createContext<WorkflowState | undefined>(undefined);
+export const useWorkflow = () => {
+  const value = useContext(WorkflowContext);
+  if (!value) throw new Error("useWorkflow must be used within WorkflowProvider");
+  return value;
+};
+
+export function WorkflowProvider({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
   const [runs, setRuns] = useState<Run[]>([]),
     [cursor, setCursor] = useState<number>(),
-    [selected, setSelected] = useState<string>(),
+    [selected, setSelected] = useState<string | undefined>(),
     [trace, setTrace] = useState<Event[]>([]),
+    [traceRunId, setTraceRunId] = useState<string>(),
     [traceCursor, setTraceCursor] = useState<number>(),
     [hasMore, setHasMore] = useState(false),
     [traceSummary, setTraceSummary] = useState<TraceSummary>(),
     [error, setError] = useState(""),
     [launching, setLaunching] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   const selectedRef = useRef<string | undefined>(undefined);
   const runsRef = useRef<Run[]>([]);
   const traceCursorRef = useRef<number | undefined>(undefined);
@@ -198,11 +238,6 @@ export function App() {
           : p.runs;
       });
       setCursor(p.nextCursor);
-      setSelected((s) =>
-        s && (before || p.runs.some((r) => r.id === s) || runsRef.current.some((r) => r.id === s))
-          ? s
-          : undefined,
-      );
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) setError(String(e));
     } finally {
@@ -228,12 +263,17 @@ export function App() {
     request.controller?.abort();
     const controller = new AbortController();
     request.controller = controller;
+    setUnavailable(false);
     try {
       const p = await api<TracePage>(
         `/api/sessions/${encodeURIComponent(id)}/trace?limit=500${after !== undefined ? `&after=${after}` : ""}`,
         controller.signal,
       );
       if (generation !== request.generation || selectedRef.current !== id) return;
+      if (p.publicRun)
+        setRuns((current) => [p.publicRun!, ...current.filter((run) => run.id !== id)]);
+      setTraceRunId(id);
+      setUnavailable(false);
       setTraceSummary(p.summary);
       setTrace((x) =>
         after !== undefined
@@ -250,12 +290,18 @@ export function App() {
       setHasMore(p.hasMore);
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
-      if (e instanceof Error && (e as Error & { status?: number }).status === 404) {
-        setRuns((current) => current.filter((run) => run.id !== id));
-        setSelected((current) => (current === id ? undefined : current));
+      if (
+        e instanceof Error &&
+        (e as Error & { status?: number }).status === 404 &&
+        generation === request.generation &&
+        selectedRef.current === id
+      ) {
+        setUnavailable(true);
+        setTraceRunId(id);
         return;
       }
-      setError(e instanceof Error ? e.message : String(e));
+      if (generation === request.generation && selectedRef.current === id)
+        setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (request.controller === controller) {
         request.inFlight = false;
@@ -306,24 +352,30 @@ export function App() {
     if (!selected) {
       cancelTraceRequest();
       setTrace([]);
+      setTraceRunId(undefined);
       setTraceCursor(undefined);
       setTraceSummary(undefined);
+      setHasMore(false);
       return;
     }
     cancelTraceRequest();
+    setTrace([]);
+    setTraceRunId(undefined);
     setTraceCursor(undefined);
     setTraceSummary(undefined);
+    setHasMore(false);
     loadTrace(selected);
   }, [selected]);
   const run = runs.find((x) => x.id === selected);
   const [deleting, setDeleting] = useState(false);
   const deleteSelected = async () => {
-    if (!selected) return;
+    const id = selected;
+    if (!id) return;
     setDeleting(true);
     try {
-      await api(`/api/sessions/${encodeURIComponent(selected)}`, undefined, "DELETE");
-      setRuns((current) => current.filter((item) => item.id !== selected));
-      setSelected(undefined);
+      await api(`/api/sessions/${encodeURIComponent(id)}`, undefined, "DELETE");
+      setRuns((current) => current.filter((item) => item.id !== id));
+      if (selectedRef.current === id) void navigate({ to: "/runs", replace: true });
       setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -339,7 +391,7 @@ export function App() {
         agentName,
       });
       setRuns((current) => [response.run, ...current.filter((run) => run.id !== response.run.id)]);
-      setSelected(response.run.id);
+      void navigate({ to: "/runs/$runId", params: { runId: response.run.id } });
       setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -352,6 +404,40 @@ export function App() {
     () => Array.from(new Set(trace.map((e) => e.agentName).filter(Boolean) as string[])),
     [trace],
   );
+  return (
+    <WorkflowContext.Provider
+      value={{
+        runs,
+        cursor,
+        trace,
+        traceRunId,
+        traceCursor,
+        hasMore,
+        traceSummary,
+        error,
+        launching,
+        deleting,
+        unavailable,
+        selected,
+        run: runs.find((x) => x.id === selected),
+        load,
+        loadTrace,
+        launch,
+        deleteSelected,
+        setSelected: (id) => {
+          selectedRef.current = id;
+          setUnavailable(false);
+          setSelected(id);
+        },
+      }}
+    >
+      {children}
+    </WorkflowContext.Provider>
+  );
+}
+
+export function App({ children }: { children: ReactNode }) {
+  const { error } = useWorkflow();
   return (
     <div className="shell">
       <header>
@@ -375,33 +461,12 @@ export function App() {
             {error}
           </div>
         )}
-        {selected && run ? (
-          <Detail
-            run={run}
-            trace={trace}
-            traceSummary={traceSummary}
-            agents={agents}
-            onBack={() => setSelected(undefined)}
-            onMore={() => loadTrace(selected, traceCursor)}
-            hasMore={hasMore}
-            deleting={deleting}
-            onDelete={deleteSelected}
-          />
-        ) : (
-          <List
-            runs={runs}
-            onSelect={setSelected}
-            onMore={() => cursor && load(cursor)}
-            hasMore={!!cursor}
-            launching={launching}
-            onLaunch={launch}
-          />
-        )}
+        {children}
       </main>
     </div>
   );
 }
-function List({
+export function List({
   runs,
   onSelect,
   onMore,
@@ -526,7 +591,21 @@ function List({
     </>
   );
 }
-function Detail({
+export function Unavailable({ onBack }: { onBack: () => void }) {
+  return (
+    <section className="hero">
+      <div>
+        <p className="eyebrow">SESSION TRACE</p>
+        <h1>Run unavailable</h1>
+        <p className="muted">This run was not found or has been deleted.</p>
+        <Button variant="outline" onClick={onBack}>
+          All sessions
+        </Button>
+      </div>
+    </section>
+  );
+}
+export function Detail({
   run,
   trace,
   traceSummary,
