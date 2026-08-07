@@ -120,6 +120,34 @@ describe("standalone plans", () => {
     expect(mission.milestones[0].tasks[1].dependsOn).toEqual([mission.milestones[0].tasks[0].id]);
     expect(mission.sourcePlan).toEqual({ planId: p.id, revision: 1 });
   });
+  test("create accepts inline JSON and always creates a draft", async () => {
+    const d = await repo();
+    const inline = JSON.stringify({
+      missionTitle: "Inline",
+      verificationMode: "fast",
+      sections,
+      milestones: [{ key: "build", title: "Build" }],
+      steps: [
+        {
+          key: "one",
+          milestoneKey: "build",
+          title: "One",
+          type: "implementation",
+          risk: "low",
+          verification: "Check one",
+          dependsOn: [],
+        },
+      ],
+    });
+    const created = await run(d, "plan", "create", "--input-json", inline, "--json");
+    expect(created.exitCode).toBe(0);
+    expect(JSON.parse(created.stdout)).toMatchObject({ missionTitle: "Inline", status: "draft" });
+    expect(JSON.parse((await run(d, "mission", "list", "--json")).stdout)).toEqual([]);
+
+    const invalid = await run(d, "plan", "create", "--input-json", "not-json", "--json");
+    expect(invalid.exitCode).not.toBe(0);
+    expect(invalid.stderr).toContain("Invalid JSON input");
+  });
   test("rejects unresolved dependency without mission writes", async () => {
     const d = await repo(),
       input = await planInput(d),

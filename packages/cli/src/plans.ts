@@ -131,6 +131,24 @@ export const PlanSchema = PlanRevisionSchema;
 export type Plan = z.infer<typeof PlanSchema>;
 export type PlanRevision = z.infer<typeof PlanRevisionSchema>;
 
+export async function createDraftPlan(input: PlanInput, file: string): Promise<Plan> {
+  return withFactoryLock(async () => {
+    const plans = await loadPlans(file, []);
+    const now = new Date().toISOString();
+    const plan = PlanSchema.parse({
+      ...PlanInputSchema.parse(input),
+      id: `pln_${crypto.randomUUID().replaceAll("-", "")}`,
+      revision: 1,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    validatePlansAgainstMissions([...plans, plan], []);
+    await savePlansUnlocked([...plans, plan], file);
+    return plan;
+  });
+}
+
 export type MissionReference = {
   id: string;
   milestones: Array<{ id: string; tasks: Array<{ id: string }> }>;

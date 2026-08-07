@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
+  createDraftPlan,
   loadPlans,
   PlanSchema,
   PlanInputSchema,
@@ -709,6 +710,17 @@ async function inputJson(file: string): Promise<Record<string, unknown>> {
     throw Error("Plan input must be a JSON object");
   return value as Record<string, unknown>;
 }
+function inputJsonString(value: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (e) {
+    throw Error(`Invalid JSON input: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw Error("Plan input must be a JSON object");
+  return parsed as Record<string, unknown>;
+}
 function revisionToken(value: string) {
   if (!/^[1-9][0-9]*$/.test(value))
     throw Error(`Invalid revision: ${value}. Expected a positive integer`);
@@ -841,24 +853,24 @@ const pc = jsonOption(
     ),
 )
   .option("--input <json-file>", "JSON input file")
+  .option("--input-json <json>", "JSON input string")
   .option("--schema", "Print the accepted user input schema");
 pc.action(async (opts, cmd) => {
   if (opts.schema) {
-    if (opts.input) throw Error("--schema is mutually exclusive with --input");
+    if (opts.input || opts.inputJson)
+      throw Error("--schema is mutually exclusive with --input and --input-json");
     output(z.toJSONSchema(PlanInputSchema), isJson(cmd));
     return;
   }
-  if (!opts.input) throw Error("Required option '--input <json-file>' (or use --schema)");
-  return withLock(async () => {
-    const { p } = await planContext();
-    const file = join(p.dir, "plans.jsonl"),
-      all = await loadPlans(file, []),
-      t = now(),
-      record = planInput(await inputJson(opts.input), makeId("pln"), 1, "draft", t, t);
-    validatePlansAgainstMissions([...all, record], []);
-    await savePlansUnlocked([...all, record], file);
-    output(record, isJson(cmd));
-  });
+  if (opts.input && opts.inputJson) throw Error("--input and --input-json are mutually exclusive");
+  if (!opts.input && !opts.inputJson)
+    throw Error("Required option '--input <json-file>' or '--input-json <json>' (or use --schema)");
+  const { p } = await planContext();
+  const record = await createDraftPlan(
+    parsePlanInput(opts.inputJson ? inputJsonString(opts.inputJson) : await inputJson(opts.input)),
+    join(p.dir, "plans.jsonl"),
+  );
+  output(record, isJson(cmd));
 });
 const pl = jsonOption(plan.command("list"));
 pl.action(async (_, cmd) => {

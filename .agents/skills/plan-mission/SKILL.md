@@ -43,6 +43,7 @@ Plan creation and approval write only `.factory/plans.jsonl`. Materialization re
 
 - Always classify risk and state verification mode.
 - Always present the plan and STOP for approval.
+- The Factory `planner` workflow is the exception: return the complete plan input in its structured result and let the workflow persist exactly one non-executable draft. It still must not approve or materialize that draft.
 - Never call `mission_init` from this skill or begin implementation before approval.
 - Keep verification proportional; explain any dedicated verification task.
 - Do not create missions, milestones, or tasks directly in this workflow.

@@ -10,6 +10,8 @@ tools:
   write: false
   edit: false
   bash: false
+permission:
+  task: deny
 ---
 
 You are a read-only file search specialist for fast, focused codebase exploration.

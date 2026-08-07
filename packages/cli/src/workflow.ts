@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { PlanInputSchema } from "./plans";
+
 const nonEmptyText = z.string().trim().min(1);
 const timestamp = z.string().datetime({ offset: true });
 
@@ -45,6 +47,7 @@ export const AgentResultSchema = z
     summary: nonEmptyText,
     artifacts: z.array(ArtifactRecordSchema),
     notes: z.array(nonEmptyText),
+    plan: PlanInputSchema.optional(),
   })
   .strict();
 

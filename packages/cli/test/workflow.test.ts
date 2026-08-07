@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-import { parseFinalAssistantResult } from "../src/completion";
 import { OpenCodeAdapter } from "../src/backend";
+import { parseFinalAssistantResult } from "../src/completion";
 import {
   BUILTIN_ROSTER_VERSION,
   RESULT_INSTRUCTIONS,
@@ -152,16 +152,18 @@ test("built-in scout roster lookup and prompt rendering are deterministic", () =
   expect(reordered.userPrompt).toBe(ordered.userPrompt);
 });
 
-test("planner roster renders a delegated, non-persisting plan prompt", () => {
+test("planner roster renders a delegated, workflow-persisted draft plan prompt", () => {
   const planner = getRosterEntry("planner");
   expect(planner?.opencodeAgent).toBe("plan-mission");
   expect(planner?.model).toBe("github-copilot/gpt-5.6-terra");
   const rendered = renderAgentPrompts("planner", "Plan notifications");
   expect(rendered.systemPrompt).toContain("codebase-explorer");
-  expect(rendered.systemPrompt).toContain("plan-mission skill");
-  expect(rendered.systemPrompt).toContain("complete approval-ready Markdown mission plan in summary");
+  expect(rendered.systemPrompt).toContain("Factory plan input in the result plan field");
+  expect(rendered.systemPrompt).toContain("workflow validates and persists exactly one draft");
+  expect(rendered.systemPrompt).toContain("appends its pln_ ID");
+  expect(rendered.systemPrompt).toContain("Do not approve, materialize, revise, archive");
   expect(rendered.systemPrompt).not.toContain("Do not include planning");
-  expect(rendered.userPrompt).toContain("complete plan in the result summary");
+  expect(rendered.userPrompt).toContain("let the workflow create the draft");
 });
 
 test("OpenCode adapter adds the roster OpenCode agent", async () => {

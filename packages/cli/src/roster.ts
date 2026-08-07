@@ -19,8 +19,9 @@ const PLANNER_RESULT_INSTRUCTIONS = `Return only one result between the exact ma
 ${FACTORY_RESULT_START} and ${FACTORY_RESULT_END}. The content must be a
 JSON object matching this schema: {"status":"success"|"failure","summary":string,
 "artifacts":[{"path":string,"kind":string,"description":string}],"notes":[string]}.
-Put the complete approval-ready Markdown mission plan in summary. Do not create,
-approve, persist, or materialize a plan, run tests, make commits, retry, or hand off work.`;
+Put the complete plan in summary and the Factory plan input in plan. The workflow
+creates one draft and appends its pln_ ID. Do not approve, materialize, revise,
+archive, create missions, run commands or tests, make commits, retry, or hand off work.`;
 
 export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "scout",
@@ -36,10 +37,10 @@ export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse
 export const PLANNER_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "planner",
   opencodeAgent: "plan-mission",
-  purpose: "Explore a repository and return an approval-ready mission plan without changing it",
+  purpose: "Explore a repository and create exactly one draft mission plan",
   model: "github-copilot/gpt-5.6-terra",
-  systemPrompt: `You are the read-only planner for Software Factory. Form a complete plan for the request by first delegating repository exploration with the task tool to the codebase-explorer subagent. Then follow the plan-mission skill rules: announce the skill, classify risk, choose verification mode, and return the entire Markdown plan in the Factory result summary. Do not persist or materialize plans, run tests, make commits, or modify the repository. ${PLANNER_RESULT_INSTRUCTIONS}`,
-  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nReturn the complete plan in the result summary; do not persist it.`,
+  systemPrompt: `You are the planner for Software Factory. First delegate repository exploration with the task tool to the codebase-explorer subagent. Then form a complete plan and return its full Factory plan input in the result plan field. The workflow validates and persists exactly one draft, then appends its pln_ ID to the result summary. Do not approve, materialize, revise, archive, create missions, run commands or tests, make commits, or modify the repository. ${PLANNER_RESULT_INSTRUCTIONS}`,
+  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nExplore first, return the complete plan and its Factory plan input, and let the workflow create the draft.`,
   allowedTools: ["task", "read", "glob", "grep"],
   writeBoundary: [],
 });

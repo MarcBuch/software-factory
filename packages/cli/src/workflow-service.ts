@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile, lstat, unlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { OpenCodeAdapter, type BackendAdapter, type BackendProcess } from "./backend";
 import { completeAgent } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
+import { createDraftPlan } from "./plans";
 import { lookupRoster, renderAgentPrompts } from "./roster";
 import { WorkflowInputSchema, type WorkflowInput } from "./workflow";
 import { openWorkflowStorage, type RunRecord } from "./workflow-storage";
@@ -113,6 +114,59 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function delegatedExplorer(outcome: WorkflowOutcome) {
+  const starts = new Set<string>();
+  for (const event of outcome.events) {
+    const normalized = event.normalized;
+    if (normalized?.type !== "tool_call" || normalized.tool !== "task" || !normalized.spanId)
+      continue;
+    if (
+      normalized.phase === "start" &&
+      normalized.input &&
+      typeof normalized.input === "object" &&
+      (normalized.input as Record<string, unknown>).subagent_type === "codebase-explorer"
+    )
+      starts.add(normalized.spanId);
+    if (
+      normalized.phase === "finish" &&
+      starts.has(normalized.spanId) &&
+      normalized.output &&
+      typeof normalized.output === "object" &&
+      (normalized.output as Record<string, unknown>).status === "success"
+    )
+      return true;
+  }
+  return false;
+}
+
+type FactoryFile = Readonly<{ content?: string }>;
+type FactoryState = Readonly<{ plans: FactoryFile; missions: FactoryFile }>;
+async function factoryState(root: string): Promise<FactoryState> {
+  const read = async (name: string): Promise<FactoryFile> => {
+    const file = join(root, ".factory", name);
+    const stat = await lstat(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!stat) return {};
+    if (stat.isSymbolicLink()) throw Error(`Unsafe Factory state symlink: ${name}`);
+    if (!stat.isFile()) throw Error(`Unsafe Factory state file: ${name}`);
+    return { content: await readFile(file, "utf8") };
+  };
+  return { plans: await read("plans.jsonl"), missions: await read("missions.jsonl") };
+}
+async function restoreFactoryState(root: string, state: FactoryState) {
+  for (const [name, content] of Object.entries(state)) {
+    const file = join(root, ".factory", `${name}.jsonl`);
+    const stat = await lstat(file).catch(() => undefined);
+    if (stat?.isSymbolicLink()) await unlink(file);
+    if (content.content === undefined) await rm(file, { force: true });
+    else await writeFile(file, content.content, { mode: 0o600 });
+  }
+  if (JSON.stringify(await factoryState(root)) !== JSON.stringify(state))
+    throw Error("Factory state restoration failed");
+}
+
 async function terminalFailure(
   storage: Awaited<ReturnType<typeof openWorkflowStorage>>,
   run: RunRecord,
@@ -150,6 +204,7 @@ export async function startWorkflow(
   try {
     storage = await openWorkflowStorage(root);
     const boundary = await captureGitBoundary({ repositoryRoot: root });
+    const initialFactoryState = await factoryState(root);
     const preliminary = renderAgentPrompts(agent.name, parsed.request, {});
     run = await storage.createRun({
       systemPrompt: preliminary.systemPrompt,
@@ -220,6 +275,7 @@ export async function startWorkflow(
       agent,
       prompts,
       boundary,
+      initialFactoryState,
       root,
       lock,
     });
@@ -244,10 +300,12 @@ async function completeWorkflow(args: {
   agent: ReturnType<typeof lookupRoster>;
   prompts: ReturnType<typeof renderAgentPrompts>;
   boundary: Awaited<ReturnType<typeof captureGitBoundary>>;
+  initialFactoryState: FactoryState;
   root: string;
   lock: WorkflowLock;
 }): Promise<RunRecord | undefined> {
-  const { storage, run, processRun, agent, prompts, boundary, root, lock } = args;
+  const { storage, run, processRun, agent, prompts, boundary, initialFactoryState, root, lock } =
+    args;
   try {
     const invocation = {
       repositoryRoot: root,
@@ -278,7 +336,7 @@ async function completeWorkflow(args: {
         });
       },
     );
-    const result =
+    let result =
       "result" in outcome
         ? outcome.result
         : {
@@ -290,7 +348,26 @@ async function completeWorkflow(args: {
             artifacts: [],
             notes: [],
           };
-    if ("result" in outcome) await storage.writeResult(run.id, outcome.result);
+    if (
+      agent.name === "planner" &&
+      JSON.stringify(await factoryState(root)) !== JSON.stringify(initialFactoryState)
+    ) {
+      await restoreFactoryState(root, initialFactoryState);
+      throw Error("Planner may not mutate Factory plan or mission state");
+    }
+    if (agent.name === "planner" && outcome.kind === "success") {
+      if (!delegatedExplorer(outcome)) throw Error("Planner must delegate to codebase-explorer");
+      if (!result.plan) throw Error("Planner must return a complete plan input");
+      const plan = await createDraftPlan(result.plan, join(root, ".factory", "plans.jsonl"));
+      if ((await factoryState(root)).missions.content !== initialFactoryState.missions.content)
+        throw Error("Planner draft creation changed mission state");
+      result = {
+        ...result,
+        summary: `${result.summary}\n\nDraft plan: ${plan.id}`,
+        notes: [...result.notes, `Created draft plan ${plan.id}`],
+      };
+    }
+    if ("result" in outcome) await storage.writeResult(run.id, result);
     storage.appendTrace({
       runId: run.id,
       at: new Date().toISOString(),

@@ -124,14 +124,99 @@ test("workflow CLI accepts stdout result and emits one JSON envelope", async () 
 
 test("workflow CLI invokes the planner roster entry", async () => {
   const log = join(await mkdtemp(join(tmpdir(), "factory-planner-")), "argv.log");
+  const plan = {
+    missionTitle: "Notifications",
+    verificationMode: "fast",
+    sections: {
+      context: "Context",
+      intent: "Intent",
+      approach: "Approach",
+      executionDesign: "Design",
+      implementationDetails: "Details",
+      alternatives: [],
+      risks: [],
+      acceptance: ["Accepted"],
+    },
+    milestones: [{ key: "m1", title: "Notifications" }],
+    steps: [
+      {
+        key: "m1t1",
+        milestoneKey: "m1",
+        title: "Implement notifications",
+        type: "implementation",
+        risk: "low",
+        verification: "Run focused test",
+        dependsOn: [],
+      },
+    ],
+  };
+  const plannerResult = JSON.stringify({
+    status: "success",
+    summary: "## Mission Plan: Notifications",
+    artifacts: [],
+    notes: [],
+    plan,
+  });
   const fake = await fakeScript(
-    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); ${resultSource("success", "## Mission Plan: Notifications")}`,
+    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); console.log(JSON.stringify({type:"tool_use",tool:"task",callID:"explore",input:{subagent_type:"codebase-explorer"}})); console.log(JSON.stringify({type:"tool_result",tool:"task",callID:"explore",output:{status:"success"}})); const content=["---FACTORY_RESULT_JSON---",${JSON.stringify(plannerResult)},"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
   );
   const p = await repo(fake);
-  const result = await run(p.dir, ["workflow", "run", "--agent", "planner", "plan it", "--json"], p.env);
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
   expect(result.code, result.stderr).toBe(0);
   expect(await readFile(log, "utf8")).toContain("--agent plan-mission");
-  expect(JSON.parse(result.stdout).result.summary).toContain("Mission Plan");
+  expect(await readFile(log, "utf8")).toContain("Do not approve, materialize, revise, archive");
+  const output = JSON.parse(result.stdout).result;
+  expect(output.summary).toContain("Mission Plan");
+  expect(output.summary).toMatch(/Draft plan: pln_[A-Za-z0-9]+/);
+  expect(output.notes).toContainEqual(expect.stringMatching(/^Created draft plan pln_/));
+  const planRecords = (await readFile(join(p.dir, ".factory", "plans.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(planRecords).toHaveLength(2);
+  expect(planRecords[1]).toMatchObject({ missionTitle: "Notifications", status: "draft" });
+  expect(await Bun.file(join(p.dir, ".factory", "missions.jsonl")).exists()).toBe(false);
+});
+
+test("planner refuses to persist a draft without codebase exploration", async () => {
+  const p = await repo(
+    await fakeScript(
+      `const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Missing exploration",verificationMode:"fast",sections:{context:"Context",intent:"Intent",approach:"Approach",executionDesign:"Design",implementationDetails:"Details",alternatives:[],risks:[],acceptance:["Accepted"]},milestones:[{key:"m1",title:"Plan"}],steps:[{key:"m1t1",milestoneKey:"m1",title:"Implement",type:"implementation",risk:"low",verification:"Check",dependsOn:[]}]}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    ),
+  );
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout).run.failure).toMatchObject({
+    code: "WORKFLOW_FAILURE",
+    message: "Planner must delegate to codebase-explorer",
+  });
+  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
+});
+
+test("planner refuses a failed codebase exploration", async () => {
+  const p = await repo(
+    await fakeScript(
+      `console.log(JSON.stringify({type:"tool_use",tool:"task",callID:"explore",input:{subagent_type:"codebase-explorer"}})); console.log(JSON.stringify({type:"tool_result",tool:"task",callID:"explore",output:{status:"failure"}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",sections:{context:"Context",intent:"Intent",approach:"Approach",executionDesign:"Design",implementationDetails:"Details",alternatives:[],risks:[],acceptance:["Accepted"]},milestones:[{key:"m1",title:"Plan"}],steps:[{key:"m1t1",milestoneKey:"m1",title:"Implement",type:"implementation",risk:"low",verification:"Check",dependsOn:[]}]}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    ),
+  );
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout).run.failure.message).toBe(
+    "Planner must delegate to codebase-explorer",
+  );
+  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
 });
 
 test("workflow CLI deletes terminal run artifacts and rejects active runs", async () => {
