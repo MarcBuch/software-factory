@@ -489,9 +489,9 @@ export function App({ children }: { children: ReactNode }) {
       <Sidebar collapsible="icon">
         <div className="flex h-full flex-col">
           <div className="p-2">
-            <div className="brand px-2 py-2">
+            <div className="brand min-w-0 overflow-hidden px-2 py-2">
               <Radio className="mark" size={20} />
-              <div>
+              <div className="min-w-0 whitespace-nowrap group-data-[collapsible=icon]:hidden">
                 <strong>WORKFLOW</strong>
                 <small>SESSION TRACE</small>
               </div>
