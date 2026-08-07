@@ -207,10 +207,7 @@ export function validatePlansAgainstMissions(plans: Plan[], _missions: MissionRe
       if (p.revision !== i + 1) throw Error(`Plan revisions must be contiguous for ${id}`);
     });
     for (let i = 1; i < ordered.length; i++)
-      if (
-        ordered[i].createdAt < ordered[i - 1].createdAt ||
-        ordered[i].updatedAt < ordered[i - 1].updatedAt
-      )
+      if (ordered[i].createdAt < ordered[i - 1].createdAt)
         throw Error(`Revision timestamps must be chronological for ${id}`);
     if (ordered.filter((p) => p.status === "approved").length > 1)
       throw Error(`Only one revision may be approved for ${id}`);
@@ -244,13 +241,18 @@ export async function loadPlans(
   file: string | undefined,
   missions: MissionReference[],
 ): Promise<Plan[]> {
+  const plans = await loadPlanRecords(file);
+  return validatePlansAgainstMissions(plans, missions);
+}
+
+// Archive needs to recover a stale draft that prevents normal lifecycle validation.
+export async function loadPlanRecords(file: string | undefined): Promise<Plan[]> {
   file ??= await plansPath();
   if (!existsSync(file)) return [];
   const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
   if (!lines.length) throw Error("Invalid plan storage: missing metadata");
   PlansMetadataSchema.parse(JSON.parse(lines[0]));
-  const plans = lines.slice(1).map((line) => PlanSchema.parse(JSON.parse(line)));
-  return validatePlansAgainstMissions(plans, missions);
+  return lines.slice(1).map((line) => PlanSchema.parse(JSON.parse(line)));
 }
 
 export async function savePlansUnlocked(plans: Plan[], file: string) {

@@ -178,10 +178,50 @@ describe("standalone plans", () => {
       p = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout);
     expect((await run(d, "plan", "show", p.id, "--revision", "1", "--json")).exitCode).toBe(0);
     expect((await run(d, "plan", "validate", p.id, "--revision", "1", "--json")).exitCode).toBe(0);
+    const archived = JSON.parse(
+      (await run(d, "plan", "archive", p.id, "--revision", "1", "--json")).stdout,
+    );
+    const revisionTwo = {
+      ...archived,
+      revision: 2,
+      status: "draft",
+      updatedAt: new Date().toISOString(),
+    };
+    delete revisionTwo.approvedAt;
+    const planFile = join(d, ".factory/plans.jsonl");
+    await writeFile(
+      planFile,
+      `${(await readFile(planFile, "utf8")).trim()}\n${JSON.stringify(revisionTwo)}\n`,
+    );
+    expect((await run(d, "plan", "validate", p.id, "--revision", "2", "--json")).exitCode).toBe(0);
     const f = join(d, ".factory/missions.jsonl"),
       lines = (await readFile(f, "utf8")).split("\n");
     expect((await run(d, "mission", "list", "--json")).exitCode).toBe(0);
     expect(lines.join("\n")).not.toContain("transaction");
+  });
+  test("archive recovers a stale draft revision", async () => {
+    const d = await repo(),
+      input = await planInput(d),
+      created = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout),
+      file = join(d, ".factory/plans.jsonl"),
+      lines = (await readFile(file, "utf8")).trim().split("\n"),
+      first = JSON.parse(lines[1]),
+      later = "2099-01-01T00:00:01.000Z",
+      second = {
+        ...first,
+        revision: 2,
+        createdAt: later,
+        updatedAt: later,
+      };
+    await writeFile(file, `${lines[0]}\n${JSON.stringify(first)}\n${JSON.stringify(second)}\n`);
+
+    const archived = await run(d, "plan", "archive", created.id, "--revision", "1", "--json");
+    expect(archived.exitCode).toBe(0);
+    expect(JSON.parse(archived.stdout)).toMatchObject({ revision: 1, status: "archived" });
+    const validated = await run(d, "plan", "validate", "--json");
+    expect(validated.stderr).toBe("");
+    expect(validated.exitCode).toBe(0);
+    expect(JSON.parse(validated.stdout)).toEqual({ valid: true, count: 2 });
   });
   test("source plan uniqueness and no transaction artifacts", async () => {
     const d = await repo(),

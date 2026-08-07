@@ -11,6 +11,7 @@ import { z } from "zod";
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
   createDraftPlan,
+  loadPlanRecords,
   loadPlans,
   PlanSchema,
   PlanInputSchema,
@@ -900,7 +901,6 @@ pv.action(async (id, opts, cmd) => {
   const { p } = await planContext();
   const all = await loadPlans(join(p.dir, "plans.jsonl"), []);
   const result = id ? [selectedRevision(all, id, opts.revision)] : all;
-  validatePlansAgainstMissions(result, []);
   output({ valid: true, count: result.length }, isJson(cmd));
 });
 const pr = jsonOption(plan.command("revise"))
@@ -975,7 +975,7 @@ par.action(async (id, opts, cmd) =>
   withLock(async () => {
     const { p } = await planContext();
     const file = join(p.dir, "plans.jsonl"),
-      all = await loadPlans(file, []),
+      all = await loadPlanRecords(file),
       target = selectedRevision(all, id, opts.revision);
     if (target.status === "approved") throw Error("Approved plans cannot be archived");
     const next = all
