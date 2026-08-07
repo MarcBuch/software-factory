@@ -40,6 +40,7 @@ import {
   SidebarProvider,
   SidebarInset,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -449,6 +450,38 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   );
 }
 
+function SidebarNavigation() {
+  const { isMobile, setOpenMobile } = useSidebar();
+  const closeMobileSidebar = () => {
+    if (isMobile) setOpenMobile(false);
+  };
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton asChild tooltip="Workspace">
+          <Link
+            to="/workspace"
+            activeOptions={{ exact: true }}
+            activeProps={{ "data-active": true }}
+            onClick={closeMobileSidebar}
+          >
+            <FolderKanban />
+            <span>Workspace</span>
+          </Link>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+      <SidebarMenuItem>
+        <SidebarMenuButton asChild tooltip="Runs">
+          <Link to="/runs" activeProps={{ "data-active": true }} onClick={closeMobileSidebar}>
+            <Workflow />
+            <span>Runs</span>
+          </Link>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}
+
 export function App({ children }: { children: ReactNode }) {
   const { error } = useWorkflow();
   return (
@@ -468,28 +501,7 @@ export function App({ children }: { children: ReactNode }) {
             <SidebarGroup>
               <SidebarGroupLabel>Navigation</SidebarGroupLabel>
               <SidebarGroupContent>
-                <SidebarMenu>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton asChild tooltip="Workspace">
-                      <Link
-                        to="/workspace"
-                        activeOptions={{ exact: true }}
-                        activeProps={{ "data-active": true }}
-                      >
-                        <FolderKanban />
-                        <span>Workspace</span>
-                      </Link>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton asChild tooltip="Runs">
-                      <Link to="/runs" activeProps={{ "data-active": true }}>
-                        <Workflow />
-                        <span>Runs</span>
-                      </Link>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                </SidebarMenu>
+                <SidebarNavigation />
               </SidebarGroupContent>
             </SidebarGroup>
           </SidebarContent>
