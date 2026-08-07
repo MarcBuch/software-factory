@@ -14,7 +14,13 @@ Run the built-in read-only scout with a request argument:
 factory workflow run --agent scout "Find the authentication entry points"
 ```
 
-If the request argument is omitted, the request is read from stdin. `--agent scout` is currently the built-in roster entry; execution uses the current OpenCode adapter. The adapter boundary is deliberately modular so future backends can be added, but this CLI does not promise backend interchangeability or broad platform portability.
+If the request argument is omitted, the request is read from stdin. Built-in roster entries include the read-only `scout` and `planner` agents. The planner is available only when run from this repository because it uses the local `.opencode/agents/plan-mission.md` agent definition. It delegates repository exploration to `codebase-explorer`, follows the plan-mission skill format, and returns the complete plan in the Factory result summary without persisting or materializing it:
+
+```sh
+factory workflow run --agent planner "Plan adding email notifications"
+```
+
+Execution uses the current OpenCode adapter. The adapter boundary is deliberately modular so future backends can be added, but this CLI does not promise backend interchangeability or broad platform portability.
 
 Inspect or control a run with:
 

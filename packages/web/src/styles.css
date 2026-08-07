@@ -174,6 +174,27 @@ main {
   gap: 12px;
   margin: 32px 0 16px;
 }
+.launch-agent {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.launch-agent select {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--input);
+  border-radius: 6px;
+  color: var(--foreground);
+  background: var(--background);
+  font: inherit;
+  letter-spacing: normal;
+}
+.launch-agent select:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
 .section-title h2,
 .panel-head h2 {
   margin: 0;

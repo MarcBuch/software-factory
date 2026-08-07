@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { parseFinalAssistantResult } from "../src/completion";
+import { OpenCodeAdapter } from "../src/backend";
 import {
   BUILTIN_ROSTER_VERSION,
   RESULT_INSTRUCTIONS,
@@ -149,6 +150,42 @@ test("built-in scout roster lookup and prompt rendering are deterministic", () =
   const reordered = renderAgentPrompts("scout", "same", { b: 2, a: 1 });
   const ordered = renderAgentPrompts("scout", "same", { a: 1, b: 2 });
   expect(reordered.userPrompt).toBe(ordered.userPrompt);
+});
+
+test("planner roster renders a delegated, non-persisting plan prompt", () => {
+  const planner = getRosterEntry("planner");
+  expect(planner?.opencodeAgent).toBe("plan-mission");
+  expect(planner?.model).toBe("github-copilot/gpt-5.6-terra");
+  const rendered = renderAgentPrompts("planner", "Plan notifications");
+  expect(rendered.systemPrompt).toContain("codebase-explorer");
+  expect(rendered.systemPrompt).toContain("plan-mission skill");
+  expect(rendered.systemPrompt).toContain("complete approval-ready Markdown mission plan in summary");
+  expect(rendered.systemPrompt).not.toContain("Do not include planning");
+  expect(rendered.userPrompt).toContain("complete plan in the result summary");
+});
+
+test("OpenCode adapter adds the roster OpenCode agent", async () => {
+  let command: readonly string[] = [];
+  const adapter = new OpenCodeAdapter({
+    executable: "opencode",
+    spawn(args) {
+      command = args;
+      return {
+        pid: 1,
+        stdout: new ReadableStream(),
+        stderr: new ReadableStream(),
+        exited: Promise.resolve(0),
+      };
+    },
+  });
+  adapter.start({
+    repositoryRoot: "/repo",
+    runId: "run_1",
+    agent: lookupRoster("planner"),
+    prompt: "plan",
+  });
+  expect(command).toContain("--agent");
+  expect(command).toContain("plan-mission");
 });
 
 test("contracts reject unsafe paths, unknown fields, and inconsistent runs", () => {

@@ -72,6 +72,21 @@ type TracePage = {
   summary: TraceSummary;
 };
 type LaunchResponse = { accepted: true; run: Run };
+type LaunchAgent = "scout" | "planner";
+const launchAgents: Readonly<
+  Record<LaunchAgent, { label: string; detail: string; placeholder: string }>
+> = {
+  scout: {
+    label: "Scout",
+    detail: "READ-ONLY RESEARCH",
+    placeholder: "What should the scout inspect?",
+  },
+  planner: {
+    label: "Planner",
+    detail: "RESEARCH + MISSION PLAN",
+    placeholder: "What should the planner prepare?",
+  },
+};
 function responseError(text: string) {
   try {
     const value = JSON.parse(text);
@@ -318,12 +333,12 @@ function App() {
       setDeleting(false);
     }
   };
-  const launch = async (request: string) => {
+  const launch = async (request: string, agentName: LaunchAgent) => {
     setLaunching(true);
     try {
       const response = await apiJson<LaunchResponse>("/api/sessions", {
         request,
-        agentName: "scout",
+        agentName,
       });
       setRuns((current) => [response.run, ...current.filter((run) => run.id !== response.run.id)]);
       setSelected(response.run.id);
@@ -401,15 +416,17 @@ function List({
   onMore: () => void;
   hasMore: boolean;
   launching: boolean;
-  onLaunch: (request: string) => Promise<void>;
+  onLaunch: (request: string, agentName: LaunchAgent) => Promise<void>;
 }) {
   const [request, setRequest] = useState("");
+  const [agentName, setAgentName] = useState<LaunchAgent>("scout");
+  const agent = launchAgents[agentName];
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const value = request.trim();
     if (!value || launching) return;
     try {
-      await onLaunch(value);
+      await onLaunch(value, agentName);
       setRequest("");
     } catch {
       /* The parent displays the server error and preserves the request for retry. */
@@ -436,16 +453,29 @@ function List({
             <div className="panel-head">
               <div>
                 <h2>Launch workflow</h2>
-                <span>SCOUT · READ-ONLY</span>
+                <span>
+                  {agent.label.toUpperCase()} · {agent.detail}
+                </span>
               </div>
               <Button type="submit" disabled={launching || !request.trim()}>
                 {launching ? "Launching…" : "Launch session"}
               </Button>
             </div>
+            <label className="launch-agent">
+              <span>Agent</span>
+              <select
+                value={agentName}
+                onChange={(event) => setAgentName(event.target.value as LaunchAgent)}
+                disabled={launching}
+              >
+                <option value="scout">Scout - inspect the repository</option>
+                <option value="planner">Planner - prepare a mission plan</option>
+              </select>
+            </label>
             <Textarea
               value={request}
               onChange={(event) => setRequest(event.target.value)}
-              placeholder="What should the scout inspect?"
+              placeholder={agent.placeholder}
               aria-label="Workflow request"
               disabled={launching}
             />

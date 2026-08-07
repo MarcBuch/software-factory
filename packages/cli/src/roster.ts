@@ -15,6 +15,13 @@ JSON object matching this schema: {"status":"success"|"failure","summary":string
 Use repository-relative artifact paths only. Do not include planning, testing,
 commits, retries, or handoffs in the result or perform those activities.`;
 
+const PLANNER_RESULT_INSTRUCTIONS = `Return only one result between the exact markers
+${FACTORY_RESULT_START} and ${FACTORY_RESULT_END}. The content must be a
+JSON object matching this schema: {"status":"success"|"failure","summary":string,
+"artifacts":[{"path":string,"kind":string,"description":string}],"notes":[string]}.
+Put the complete approval-ready Markdown mission plan in summary. Do not create,
+approve, persist, or materialize a plan, run tests, make commits, retry, or hand off work.`;
+
 export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "scout",
   purpose: "Inspect a repository and report relevant findings without changing it",
@@ -26,7 +33,21 @@ export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse
   writeBoundary: [],
 });
 
-export const BUILTIN_ROSTER: readonly AgentRosterEntry[] = Object.freeze([SCOUT_ROSTER_ENTRY]);
+export const PLANNER_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
+  name: "planner",
+  opencodeAgent: "plan-mission",
+  purpose: "Explore a repository and return an approval-ready mission plan without changing it",
+  model: "github-copilot/gpt-5.6-terra",
+  systemPrompt: `You are the read-only planner for Software Factory. Form a complete plan for the request by first delegating repository exploration with the task tool to the codebase-explorer subagent. Then follow the plan-mission skill rules: announce the skill, classify risk, choose verification mode, and return the entire Markdown plan in the Factory result summary. Do not persist or materialize plans, run tests, make commits, or modify the repository. ${PLANNER_RESULT_INSTRUCTIONS}`,
+  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nReturn the complete plan in the result summary; do not persist it.`,
+  allowedTools: ["task", "read", "glob", "grep"],
+  writeBoundary: [],
+});
+
+export const BUILTIN_ROSTER: readonly AgentRosterEntry[] = Object.freeze([
+  SCOUT_ROSTER_ENTRY,
+  PLANNER_ROSTER_ENTRY,
+]);
 
 export type RunPromptContext = Readonly<Record<string, unknown>>;
 export type RenderedAgentPrompts = Readonly<{

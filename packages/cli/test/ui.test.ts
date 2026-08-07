@@ -53,6 +53,7 @@ test("UI session delete API removes terminal sessions and rejects missing or act
 
 test("UI session launch API validates input and returns accepted runs", async () => {
   const root = await repo();
+  const launches: Array<{ request: string; agentName: string }> = [];
   const storage = await openWorkflowStorage(root);
   const run = await storage.createRun({
     systemPrompt: "s",
@@ -70,6 +71,7 @@ test("UI session launch API validates input and returns accepted runs", async ()
     repositoryRoot: root,
     port: 0,
     launch: async (_, input) => {
+      launches.push(input);
       if (input.request === "busy") throw new WorkflowAlreadyRunning();
       if (input.request === "failed") return { run: failed, completion: Promise.resolve(failed) };
       return { run: active, completion: Promise.resolve(active) };
@@ -90,6 +92,15 @@ test("UI session launch API validates input and returns accepted runs", async ()
     });
     expect(accepted.status).toBe(202);
     expect(await accepted.json()).toMatchObject({ accepted: true, run: { id: run.id } });
+    expect(launches).toContainEqual({ request: "inspect", agentName: "scout" });
+
+    const planner = await fetch(new URL("/api/sessions", ui.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ request: "plan notifications", agentName: "planner" }),
+    });
+    expect(planner.status).toBe(202);
+    expect(launches).toContainEqual({ request: "plan notifications", agentName: "planner" });
 
     const busy = await fetch(new URL("/api/sessions", ui.url), {
       method: "POST",

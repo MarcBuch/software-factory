@@ -122,6 +122,18 @@ test("workflow CLI accepts stdout result and emits one JSON envelope", async () 
   );
 });
 
+test("workflow CLI invokes the planner roster entry", async () => {
+  const log = join(await mkdtemp(join(tmpdir(), "factory-planner-")), "argv.log");
+  const fake = await fakeScript(
+    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); ${resultSource("success", "## Mission Plan: Notifications")}`,
+  );
+  const p = await repo(fake);
+  const result = await run(p.dir, ["workflow", "run", "--agent", "planner", "plan it", "--json"], p.env);
+  expect(result.code, result.stderr).toBe(0);
+  expect(await readFile(log, "utf8")).toContain("--agent plan-mission");
+  expect(JSON.parse(result.stdout).result.summary).toContain("Mission Plan");
+});
+
 test("workflow CLI deletes terminal run artifacts and rejects active runs", async () => {
   const p = await repo(await fakeScript(resultSource()));
   const completed = JSON.parse(

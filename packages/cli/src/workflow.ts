@@ -25,6 +25,7 @@ export const WorkflowInputSchema = z
 export const AgentRosterEntrySchema = z
   .object({
     name: nonEmptyText,
+    opencodeAgent: nonEmptyText.optional(),
     purpose: nonEmptyText,
     model: nonEmptyText,
     systemPrompt: nonEmptyText,

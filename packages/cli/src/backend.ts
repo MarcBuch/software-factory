@@ -310,6 +310,7 @@ export class OpenCodeAdapter implements BackendAdapter {
       "json",
       "--dir",
       invocation.repositoryRoot,
+      ...(invocation.agent.opencodeAgent ? ["--agent", invocation.agent.opencodeAgent] : []),
       "--model",
       invocation.model ?? invocation.agent.model,
       ...(invocation._sessionId ? ["--session", invocation._sessionId] : []),
