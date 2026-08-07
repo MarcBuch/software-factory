@@ -143,7 +143,8 @@ export async function startUiServer(options: UiServerOptions) {
         const traceMatch = path.match(/^\/api\/(?:sessions|runs)\/([^/]+)\/trace$/);
         if (traceMatch) {
           const runId = decodeURIComponent(traceMatch[1]!);
-          if (!storage.getRun(runId)) return json({ error: "session not found" }, 404);
+          const run = storage.getRun(runId);
+          if (!run) return json({ error: "session not found" }, 404);
           const page = storage.tracePage(runId, {
             ...(url.searchParams.has("after")
               ? { after: numberParam(url.searchParams.get("after"), 0) }
@@ -183,6 +184,7 @@ export async function startUiServer(options: UiServerOptions) {
             nextCursor: page.nextCursor,
             hasMore: page.hasMore,
             summary,
+            publicRun: publicRun(run),
           });
         }
         if (path === "/api/events" || path === "/api/sessions/events") {
@@ -227,6 +229,15 @@ export async function startUiServer(options: UiServerOptions) {
             return new Response(body, {
               headers: { "content-type": `${type}; charset=utf-8` },
             });
+          }
+          // Client-side routes are extensionless, while missing assets must remain 404s.
+          if (path !== "/api" && !path.startsWith("/api/") && !path.includes(".")) {
+            const index = join(root, "index.html");
+            if (existsSync(index)) {
+              return new Response(await readFile(index), {
+                headers: { "content-type": "text/html; charset=utf-8" },
+              });
+            }
           }
         }
         return json({ error: "not found" }, 404);

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -122,6 +122,58 @@ test("UI session launch API validates input and returns accepted runs", async ()
 
     const unsupported = await fetch(new URL("/api/runs", ui.url), { method: "POST" });
     expect(unsupported.status).toBe(404);
+  } finally {
+    ui.close();
+  }
+});
+
+test("UI serves client routes but not missing assets or API routes", async () => {
+  const root = await repo();
+  const assets = await mkdtemp(join(tmpdir(), "factory-assets-"));
+  directories.push(assets);
+  await mkdir(join(assets, "assets"));
+  await writeFile(join(assets, "index.html"), "<!doctype html><main>app</main>");
+  await writeFile(join(assets, "assets/exact.js"), "console.log('exact')");
+  const ui = await startUiServer({ repositoryRoot: root, assetsDirectory: assets, port: 0 });
+  try {
+    for (const path of ["/workspace", "/runs", "/runs/run_old"]) {
+      const response = await fetch(new URL(path, ui.url));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("app");
+    }
+    expect((await fetch(new URL("/assets/exact.js", ui.url))).status).toBe(200);
+    expect((await fetch(new URL("/missing.js", ui.url))).status).toBe(404);
+    expect((await fetch(new URL("/missing.css", ui.url))).status).toBe(404);
+    expect((await fetch(new URL("/api", ui.url))).status).toBe(404);
+    expect((await fetch(new URL("/api/missing", ui.url))).status).toBe(404);
+    expect((await fetch(new URL("/workspace", ui.url), { method: "POST" })).status).toBe(404);
+  } finally {
+    ui.close();
+  }
+});
+
+test("trace API includes the validated public run metadata", async () => {
+  const root = await repo();
+  const storage = await openWorkflowStorage(root);
+  const run = await storage.createRun({
+    systemPrompt: "s",
+    userPrompt: "u",
+    metadata: { request: "inspect", agentName: "scout", private: "hidden" },
+  });
+  storage.startRun(run.id);
+  storage.finishRun(run.id, "succeeded");
+  storage.close();
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL(`/api/runs/${run.id}/trace`, ui.url));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      publicRun: {
+        id: run.id,
+        status: "succeeded",
+        metadata: { request: "inspect", agentName: "scout" },
+      },
+    });
   } finally {
     ui.close();
   }
