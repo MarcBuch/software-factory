@@ -58,19 +58,6 @@ export function List({
   };
   return (
     <>
-      <section className="hero">
-        <div>
-          <p className="eyebrow">OBSERVABILITY / WORKFLOWS</p>
-          <h1>Session traces</h1>
-          <p className="muted">
-            Inspect agent execution, tool calls, and resource usage in real time.
-          </p>
-        </div>
-        <div className="stat">
-          <b>{runs.length}</b>
-          <span>RECENT SESSIONS</span>
-        </div>
-      </section>
       <Card className="panel">
         <CardContent>
           <form onSubmit={submit} className="grid gap-3">

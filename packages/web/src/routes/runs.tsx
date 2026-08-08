@@ -1,6 +1,7 @@
 import { createFileRoute, Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { useAppHeader } from "@/components/app-shell";
 import { List } from "@/components/runs/run-list";
 import { useWorkflow } from "@/workflow/workflow-context";
 
@@ -9,6 +10,10 @@ export const Route = createFileRoute("/runs")({
     const w = useWorkflow();
     const navigate = useNavigate();
     const isDetail = useMatches().some((match) => match.routeId === "/runs/$runId");
+    useAppHeader(
+      "Session traces",
+      "Inspect agent execution, tool calls, and resource usage in real time.",
+    );
     useEffect(() => {
       if (!isDetail) w.setSelected(undefined);
     }, [isDetail, w.setSelected]);
