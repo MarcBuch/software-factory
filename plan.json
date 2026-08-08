@@ -1,0 +1,163 @@
+{
+  "missionTitle": "Workspace Plan Index",
+  "verificationMode": "standard",
+  "sections": {
+    "context": "The Workspace route is currently a placeholder. Repository plans are durable records with lifecycle, revision, verification, milestone, step, risk, and acceptance data, but they are not yet visible in the web UI.",
+    "intent": "Provide a schema-accurate Workspace page based on the approved Variation A design. Build and verify the interface with mock data first, then add a read-only repository API and replace the mock source.",
+    "approach": "First implement the Workspace within the existing app shell using existing shadcn-style primitives such as Card, Badge, Button, and Skeleton. Use schema-accurate mocked plans so summary cards, selected-plan details, loading, empty, error, and selection behavior can be complete before API work. Then expose validated plan records from the UI server, cover it with server tests, and connect the existing view state to it.",
+    "executionDesign": "The mock-backed page renders plan lifecycle summaries, a two-column collection of plan cards, and selected-plan detail. It displays mission title, ID, revision, status, verification mode, milestone and step counts, dates, intent, milestones with typed steps, risks, and acceptance criteria. Loading placeholders use Skeleton. The API is read-only and delegates to the existing plan loading and validation behavior, returning current plan revisions without changing storage or lifecycle semantics.",
+    "implementationDetails": "Add narrowly scoped UI state and mock records in the web package, reuse existing components where possible, and add Skeleton if the repository does not already provide it using the repository dependency workflow. Add a UI-server endpoint for plans and tests for populated and empty storage. Swap the data source while preserving all Workspace states, then verify the built UI through factory ui against repository fixture data.",
+    "alternatives": [
+      {
+        "name": "Build the API before the user interface",
+        "rejectedBecause": "The requested workflow is to establish and iterate on the approved UI with realistic mock data before backend integration."
+      },
+      {
+        "name": "Use a lifecycle board layout",
+        "rejectedBecause": "Variation A was selected because it aligns with the current web shell while providing both overview and detail."
+      }
+    ],
+    "risks": [
+      {
+        "description": "Mock records can drift from the strict persisted plan schema.",
+        "mitigation": "Derive mock structure and UI mapping directly from the existing plan types and validate behavior with persisted fixture data during integration."
+      },
+      {
+        "description": "A new endpoint could bypass existing plan validation or alter lifecycle behavior.",
+        "mitigation": "Reuse the established plan loader and add focused populated and empty server tests; keep the endpoint read-only."
+      }
+    ],
+    "acceptance": [
+      "The Workspace route implements Variation A using the existing app design and shadcn components where applicable.",
+      "Mock data accurately represents plan lifecycle, revision, verification, milestones, steps, risks, and acceptance criteria.",
+      "Loading states use Skeleton placeholders and the page has distinct empty and error states.",
+      "The UI server exposes validated repository plans through a read-only API and the Workspace consumes it after integration.",
+      "Cards and selected-plan detail accurately render persisted plan fields.",
+      "Repository checks pass and the built Workspace is verified through factory ui."
+    ]
+  },
+  "milestones": [
+    {
+      "key": "m1",
+      "title": "Implement Variation A With Mock Plans"
+    },
+    {
+      "key": "m2",
+      "title": "Connect The Plans API"
+    },
+    {
+      "key": "m3",
+      "title": "Verify Integration"
+    }
+  ],
+  "steps": [
+    {
+      "key": "m1t1",
+      "milestoneKey": "m1",
+      "title": "Define schema-accurate mock plan records",
+      "type": "implementation",
+      "risk": "low",
+      "verification": "Mocks include valid lifecycle states, revisions, verification modes, milestones, steps, risks, and acceptance criteria.",
+      "inputs": ["Existing durable plan types and lifecycle rules"],
+      "invariants": ["Mock records use only valid plan statuses and step types."],
+      "outcomes": ["Reusable mock plan data for the Workspace UI."],
+      "dependsOn": []
+    },
+    {
+      "key": "m1t2",
+      "milestoneKey": "m1",
+      "title": "Build Variation A Workspace layout",
+      "type": "implementation",
+      "risk": "medium",
+      "verification": "The Workspace matches Variation A using the existing app shell and shadcn Card, Badge, Button, and related primitives where applicable.",
+      "inputs": ["Approved Variation A markup", "Existing web app shell and UI components"],
+      "invariants": [
+        "The page preserves the existing web design language and shows schema-accurate plan fields."
+      ],
+      "outcomes": ["Workspace overview, plan cards, and selected-plan detail."],
+      "dependsOn": ["m1t1"]
+    },
+    {
+      "key": "m1t3",
+      "milestoneKey": "m1",
+      "title": "Add mock-driven loading, empty, and error states",
+      "type": "implementation",
+      "risk": "low",
+      "verification": "Skeleton renders card, summary, and detail loading placeholders, with distinct empty and error states independent of the backend.",
+      "inputs": ["Workspace layout and mock data"],
+      "invariants": ["Loading UI uses Skeleton rather than ad hoc placeholder styles."],
+      "outcomes": ["Complete UI state coverage before API integration."],
+      "dependsOn": ["m1t2"]
+    },
+    {
+      "key": "m1t4",
+      "milestoneKey": "m1",
+      "title": "Test Workspace route states and selection",
+      "type": "verification",
+      "risk": "medium",
+      "verification": "Tests cover populated, loading, empty, and error states plus selected-plan rendering.",
+      "inputs": ["Mock-backed Workspace route"],
+      "outcomes": ["Focused web test coverage for the mock-first UI."],
+      "dependsOn": ["m1t3"]
+    },
+    {
+      "key": "m2t1",
+      "milestoneKey": "m2",
+      "title": "Add read-only plans API endpoint",
+      "type": "implementation",
+      "risk": "medium",
+      "verification": "The endpoint returns validated current plan revisions from .factory/plans.jsonl and returns an empty collection for empty repositories.",
+      "inputs": ["Existing plan loading and validation functions", "UI server"],
+      "invariants": ["No plan storage or lifecycle behavior changes; the endpoint is read-only."],
+      "outcomes": ["Repository plan API for the web UI."],
+      "dependsOn": []
+    },
+    {
+      "key": "m2t2",
+      "milestoneKey": "m2",
+      "title": "Cover plans API behavior",
+      "type": "verification",
+      "risk": "medium",
+      "verification": "UI-server tests cover populated and empty plan storage.",
+      "inputs": ["Plans API endpoint", "Existing UI server test patterns"],
+      "outcomes": ["Focused regression coverage for API behavior."],
+      "dependsOn": ["m2t1"]
+    },
+    {
+      "key": "m2t3",
+      "milestoneKey": "m2",
+      "title": "Replace mock source with API loading",
+      "type": "implementation",
+      "risk": "medium",
+      "verification": "The Workspace consumes the endpoint while retaining Skeleton loading, empty, error, and selected-plan states.",
+      "inputs": ["Mock-backed Workspace", "Plans API endpoint"],
+      "invariants": [
+        "The visual and interaction behavior remains consistent while only the data source changes."
+      ],
+      "outcomes": ["Repository-backed Workspace page."],
+      "dependsOn": ["m1t4", "m2t2"]
+    },
+    {
+      "key": "m2t4",
+      "milestoneKey": "m2",
+      "title": "Verify schema-to-UI mapping",
+      "type": "verification",
+      "risk": "medium",
+      "verification": "Cards and detail panel accurately render persisted plan fields.",
+      "inputs": ["API-backed Workspace", "Persisted plan fixture"],
+      "outcomes": ["Evidence that the durable schema maps correctly to the UI."],
+      "dependsOn": ["m2t3"]
+    },
+    {
+      "key": "m3t1",
+      "milestoneKey": "m3",
+      "title": "Verify built Workspace through Factory UI",
+      "type": "verification",
+      "risk": "medium",
+      "verification": "Run bun run check, launch factory ui, and confirm /workspace against a repository fixture.",
+      "inputs": ["Completed API-backed Workspace"],
+      "outcomes": ["Build and end-to-end serving evidence."],
+      "dependsOn": ["m2t4"]
+    }
+  ]
+}
