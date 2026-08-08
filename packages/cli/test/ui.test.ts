@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createDraftPlan, PLAN_INPUT_EXAMPLE, savePlans } from "../src/plans";
 import { startUiServer } from "../src/ui";
 import { WorkflowAlreadyRunning } from "../src/workflow-service";
 import { openWorkflowStorage } from "../src/workflow-storage";
@@ -174,6 +175,62 @@ test("trace API includes the validated public run metadata", async () => {
         metadata: { request: "inspect", agentName: "scout" },
       },
     });
+  } finally {
+    ui.close();
+  }
+});
+
+test("plans API returns valid stored current plan revisions", async () => {
+  const root = await repo();
+  const file = join(root, ".factory", "plans.jsonl");
+  const first = await createDraftPlan({ ...PLAN_INPUT_EXAMPLE, missionTitle: "First plan" }, file);
+  const second = await createDraftPlan(
+    { ...PLAN_INPUT_EXAMPLE, missionTitle: "Second plan" },
+    file,
+  );
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL("/api/plans", ui.url));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([first, second]);
+  } finally {
+    ui.close();
+  }
+});
+
+test("plans API returns only the latest revision for each plan ID", async () => {
+  const root = await repo();
+  const file = join(root, ".factory", "plans.jsonl");
+  const first = await createDraftPlan({ ...PLAN_INPUT_EXAMPLE, missionTitle: "First plan" }, file);
+  const latest = {
+    ...first,
+    revision: 2,
+    status: "draft" as const,
+    createdAt: new Date(Date.parse(first.createdAt) + 1_000).toISOString(),
+    updatedAt: new Date(Date.parse(first.updatedAt) + 1_000).toISOString(),
+  };
+  await savePlans(
+    [{ ...first, status: "superseded", approvedAt: first.updatedAt }, latest],
+    [],
+    file,
+  );
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL("/api/plans", ui.url));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([latest]);
+  } finally {
+    ui.close();
+  }
+});
+
+test("plans API returns an empty list when plan storage is absent", async () => {
+  const root = await repo();
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL("/api/plans", ui.url));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([]);
   } finally {
     ui.close();
   }

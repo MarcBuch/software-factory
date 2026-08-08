@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
+import { loadPlans } from "./plans";
 import {
   startWorkflow,
   validateWorkflowInput,
@@ -83,6 +84,18 @@ export async function startUiServer(options: UiServerOptions) {
         const url = new URL(request.url);
         const path = url.pathname;
         if (path === "/api/health") return json({ ok: true });
+        if (request.method === "GET" && path === "/api/plans") {
+          const plans = await loadPlans(
+            join(options.repositoryRoot, ".factory", "plans.jsonl"),
+            [],
+          );
+          const latest = new Map<string, (typeof plans)[number]>();
+          for (const plan of plans) {
+            const current = latest.get(plan.id);
+            if (!current || plan.revision > current.revision) latest.set(plan.id, plan);
+          }
+          return json([...latest.values()]);
+        }
         if (path === "/api/sessions" && request.method === "POST") {
           let input: ReturnType<typeof validateWorkflowInput>;
           try {

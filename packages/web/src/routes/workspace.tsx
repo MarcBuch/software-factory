@@ -1,27 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useAppHeader } from "@/components/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { mockPlans, type MockPlan } from "@/data/mock-plans";
-
-type WorkspaceState = "populated" | "loading" | "empty" | "error";
-
-const workspaceState = (): WorkspaceState => {
-  if (typeof window === "undefined") return "populated";
-  const state = new URLSearchParams(window.location.search).get("state");
-  return state === "loading" || state === "empty" || state === "error" ? state : "populated";
-};
+import { mapPlansResponse, type Plan } from "@/data/plans";
 
 const date = (value: string) =>
   new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }).format(
     new Date(value),
   );
 
-const statusVariant = (status: MockPlan["status"]) =>
+const statusVariant = (status: Plan["status"]) =>
   status === "approved" ? "default" : status === "draft" ? "secondary" : "outline";
 
 function Workspace() {
@@ -29,10 +21,30 @@ function Workspace() {
     "Workspace",
     "Durable plan revisions, milestones, and execution intent in one place.",
   );
-  const state = workspaceState();
-  const plans = state === "populated" ? mockPlans : [];
-  const [selectedId, setSelectedId] = useState(mockPlans[0].id);
-  const selected = plans.find((plan) => plan.id === selectedId) ?? mockPlans[0];
+  const [plans, setPlans] = useState<Plan[]>([]);
+  const [selectedId, setSelectedId] = useState<string>();
+  const [state, setState] = useState<"loading" | "empty" | "error" | "populated">("loading");
+  useEffect(() => {
+    let active = true;
+    fetch("/api/plans")
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Plans API returned ${response.status}`);
+        return mapPlansResponse(await response.json());
+      })
+      .then((nextPlans) => {
+        if (!active) return;
+        setPlans(nextPlans);
+        setSelectedId((current) =>
+          current && nextPlans.some((plan) => plan.id === current) ? current : nextPlans[0]?.id,
+        );
+        setState(nextPlans.length === 0 ? "empty" : "populated");
+      })
+      .catch(() => active && setState("error"));
+    return () => {
+      active = false;
+    };
+  }, []);
+  const selected = plans.find((plan) => plan.id === selectedId);
   const lifecycle = ["approved", "draft", "superseded", "archived"] as const;
 
   if (state === "loading") return <WorkspaceLoading />;
@@ -74,7 +86,7 @@ function Workspace() {
         {state === "error" ? (
           <StatePanel
             title="Plans could not be loaded"
-            message="The mock plans source returned an error. Try again when the plans source is available."
+            message="The plans API returned an error. Try again when the plans source is available."
             tone="error"
           />
         ) : state === "empty" ? (
@@ -87,7 +99,7 @@ function Workspace() {
             {plans.map((plan) => (
               <Card
                 key={plan.id}
-                className={plan.id === selected.id ? "border-primary shadow-md" : ""}
+                className={plan.id === selectedId ? "border-primary shadow-md" : ""}
               >
                 <CardHeader>
                   <div className="flex items-start justify-between gap-3">
@@ -120,11 +132,11 @@ function Workspace() {
                   <div className="flex items-center justify-between border-t pt-4 text-xs text-muted-foreground">
                     <span>Updated {date(plan.updatedAt)}</span>
                     <Button
-                      variant={plan.id === selected.id ? "default" : "outline"}
+                      variant={plan.id === selectedId ? "default" : "outline"}
                       size="sm"
                       onClick={() => setSelectedId(plan.id)}
                     >
-                      {plan.id === selected.id ? "Selected" : "View plan"}
+                      {plan.id === selectedId ? "Selected" : "View plan"}
                     </Button>
                   </div>
                 </CardContent>
@@ -134,7 +146,7 @@ function Workspace() {
         )}
       </section>
 
-      {state === "populated" && (
+      {state === "populated" && selected && (
         <section aria-labelledby="detail-heading" role="region">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>

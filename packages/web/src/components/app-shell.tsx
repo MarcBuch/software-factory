@@ -101,7 +101,7 @@ export function App({ children }: { children: ReactNode }) {
               <div className="brand">
                 <Radio className="mark" size={20} />
                 <div>
-                  <strong>{header.heading}</strong>
+                  <h1>{header.heading}</h1>
                   <small>{header.subheading}</small>
                 </div>
               </div>

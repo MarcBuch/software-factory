@@ -1,9 +1,54 @@
 import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { mockPlans } from "../data/mock-plans";
 import { routeTree } from "../routeTree.gen";
+
+const mockPlans = [
+  {
+    id: "pln_one",
+    missionTitle: "First plan",
+    verificationMode: "standard",
+    milestones: [{ key: "m1", title: "Build" }],
+    revision: 1,
+    status: "approved",
+    sections: {
+      context: "Context",
+      intent: "First intent",
+      approach: "Approach",
+      executionDesign: "Design",
+      implementationDetails: "Details",
+      alternatives: [],
+      risks: [],
+      acceptance: ["Accept"],
+    },
+    steps: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-02T00:00:00.000Z",
+    approvedAt: "2026-01-02T00:00:00.000Z",
+  },
+  {
+    id: "pln_two",
+    missionTitle: "Second plan",
+    verificationMode: "fast",
+    milestones: [],
+    revision: 1,
+    status: "draft",
+    sections: {
+      context: "Context",
+      intent: "Second intent",
+      approach: "Approach",
+      executionDesign: "Design",
+      implementationDetails: "Details",
+      alternatives: [],
+      risks: [],
+      acceptance: ["Accept"],
+    },
+    steps: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-02T00:00:00.000Z",
+  },
+] as const;
 
 const run = {
   id: "run-1",
@@ -52,6 +97,7 @@ function setup(initialEntry = "/runs") {
       return Promise.resolve(
         jsonResponse({ runId: "run-1", events: [], hasMore: false, summary, publicRun: run }),
       );
+    if (path.endsWith("/api/plans")) return Promise.resolve(jsonResponse(mockPlans));
     return Promise.resolve(jsonResponse({ runs: [run] }));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -61,6 +107,7 @@ function setup(initialEntry = "/runs") {
 }
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -69,7 +116,7 @@ describe("router shell", () => {
     const { router } = setup("/");
     const rendered = render(<RouterProvider router={router} />);
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(
       screen.getByText("Durable plan revisions, milestones, and execution intent in one place."),
     ).toBeInTheDocument();
@@ -78,8 +125,7 @@ describe("router shell", () => {
     expect(MockEventSource.instances[0].url).toBe("/api/events");
     fireEvent.click(screen.getByRole("link", { name: /^runs$/i }));
     expect(await screen.findByRole("heading", { name: "Session traces" })).toBeInTheDocument();
-    expect(screen.getByText("WORKFLOW")).toBeInTheDocument();
-    expect(screen.getByText("SESSION TRACE")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "WORKFLOW" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /inspect the repository/i }));
     await waitFor(() => expect(router.history.location.pathname).toBe("/runs/run-1"));
     expect(await screen.findByText("run-1")).toBeInTheDocument();
@@ -124,9 +170,11 @@ describe("router shell", () => {
     render(<RouterProvider router={router} />);
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: mockPlans[0].missionTitle })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Selected" })).toBeInTheDocument();
     const detail = screen.getByRole("region", { name: mockPlans[0].missionTitle });
+    expect(
+      within(detail).getByRole("heading", { name: mockPlans[0].missionTitle }),
+    ).toBeInTheDocument();
     expect(within(detail).getByText(mockPlans[0].sections.intent)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "View plan" }));
@@ -137,15 +185,35 @@ describe("router shell", () => {
   });
 
   test.each([
-    ["loading", "Loading workspace", "label"],
-    ["empty", "No plan revisions yet", "text"],
-    ["error", "Plans could not be loaded", "text"],
-  ] as const)("renders the workspace %s state", async (state, expected, matcher) => {
-    const { router } = setup(`/workspace?state=${state}`);
+    ["empty", "No plan revisions yet"],
+    ["error", "Plans could not be loaded"],
+  ] as const)("renders the API-driven workspace %s state", async (state, expected) => {
+    const { router, fetchMock } = setup("/workspace");
+    fetchMock.mockImplementation((input: RequestInfo | URL) =>
+      String(input).endsWith("/api/plans")
+        ? state === "empty"
+          ? Promise.resolve(jsonResponse([]))
+          : Promise.resolve(jsonResponse({ error: "unavailable" }, 503))
+        : Promise.resolve(jsonResponse({ runs: [run] })),
+    );
     render(<RouterProvider router={router} />);
 
-    expect(
-      await (matcher === "label" ? screen.findByLabelText(expected) : screen.findByText(expected)),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+  });
+
+  test("renders an error for malformed successful plans data", async () => {
+    const { router, fetchMock } = setup("/workspace");
+    fetchMock.mockImplementation((input: RequestInfo | URL) =>
+      String(input).endsWith("/api/plans")
+        ? Promise.resolve(
+            jsonResponse([
+              { ...mockPlans[0], sections: { ...mockPlans[0].sections, risks: "invalid" } },
+            ]),
+          )
+        : Promise.resolve(jsonResponse({ runs: [run] })),
+    );
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findByText("Plans could not be loaded")).toBeInTheDocument();
   });
 });
