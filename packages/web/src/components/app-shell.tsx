@@ -70,12 +70,13 @@ export function App({ children }: { children: ReactNode }) {
               </SidebarGroupContent>
             </SidebarGroup>
           </SidebarContent>
+          <SidebarTrigger className="absolute top-4 -right-9 z-20 hidden md:inline-flex" />
         </div>
       </Sidebar>
       <SidebarInset>
         <header>
           <div className="header-leading">
-            <SidebarTrigger />
+            <SidebarTrigger className="md:hidden" />
             <div className="brand">
               <Radio className="mark" size={20} />
               <div>
