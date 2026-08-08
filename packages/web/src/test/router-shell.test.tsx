@@ -1,7 +1,8 @@
 import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { mockPlans } from "../data/mock-plans";
 import { routeTree } from "../routeTree.gen";
 
 const run = {
@@ -41,6 +42,7 @@ function jsonResponse(value: unknown, status = 200) {
 
 function setup(initialEntry = "/runs") {
   MockEventSource.instances = [];
+  window.history.replaceState({}, "", initialEntry);
   vi.stubGlobal("EventSource", MockEventSource);
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -67,11 +69,17 @@ describe("router shell", () => {
     const { router } = setup("/");
     const rendered = render(<RouterProvider router={router} />);
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+    expect(
+      screen.getByText("Durable plan revisions, milestones, and execution intent in one place."),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /workspace/i })).toHaveAttribute("data-active", "true");
     expect(MockEventSource.instances).toHaveLength(1);
     expect(MockEventSource.instances[0].url).toBe("/api/events");
     fireEvent.click(screen.getByRole("link", { name: /^runs$/i }));
     expect(await screen.findByRole("heading", { name: "Session traces" })).toBeInTheDocument();
+    expect(screen.getByText("WORKFLOW")).toBeInTheDocument();
+    expect(screen.getByText("SESSION TRACE")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /inspect the repository/i }));
     await waitFor(() => expect(router.history.location.pathname).toBe("/runs/run-1"));
     expect(await screen.findByText("run-1")).toBeInTheDocument();
@@ -109,5 +117,35 @@ describe("router shell", () => {
     );
     render(<RouterProvider router={router} />);
     expect(await screen.findByRole("heading", { name: "Run unavailable" })).toBeInTheDocument();
+  });
+
+  test("renders workspace plans and updates the selected plan detail", async () => {
+    const { router } = setup("/workspace");
+    render(<RouterProvider router={router} />);
+
+    expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: mockPlans[0].missionTitle })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Selected" })).toBeInTheDocument();
+    const detail = screen.getByRole("region", { name: mockPlans[0].missionTitle });
+    expect(within(detail).getByText(mockPlans[0].sections.intent)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View plan" }));
+
+    expect(await within(detail).findByText(mockPlans[1].sections.intent)).toBeInTheDocument();
+    expect(within(detail).queryByText(mockPlans[0].sections.intent)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Selected" })).toBeInTheDocument();
+  });
+
+  test.each([
+    ["loading", "Loading workspace", "label"],
+    ["empty", "No plan revisions yet", "text"],
+    ["error", "Plans could not be loaded", "text"],
+  ] as const)("renders the workspace %s state", async (state, expected, matcher) => {
+    const { router } = setup(`/workspace?state=${state}`);
+    render(<RouterProvider router={router} />);
+
+    expect(
+      await (matcher === "label" ? screen.findByLabelText(expected) : screen.findByText(expected)),
+    ).toBeInTheDocument();
   });
 });
