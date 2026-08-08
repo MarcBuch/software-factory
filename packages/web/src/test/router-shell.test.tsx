@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -103,7 +104,8 @@ function setup(initialEntry = "/runs") {
   vi.stubGlobal("fetch", fetchMock);
   const history = createMemoryHistory({ initialEntries: [initialEntry] });
   const router = createRouter({ routeTree, history });
-  return { fetchMock, router };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return { fetchMock, router, queryClient };
 }
 
 afterEach(() => {
@@ -113,8 +115,12 @@ afterEach(() => {
 
 describe("router shell", () => {
   test("redirects the root, marks navigation, and preserves detail history", async () => {
-    const { router } = setup("/");
-    const rendered = render(<RouterProvider router={router} />);
+    const { router, queryClient } = setup("/");
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(
@@ -125,7 +131,7 @@ describe("router shell", () => {
     expect(MockEventSource.instances[0].url).toBe("/api/events");
     fireEvent.click(screen.getByRole("link", { name: /^runs$/i }));
     expect(await screen.findByRole("heading", { name: "Session traces" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "WORKFLOW" })).toBeInTheDocument();
+    expect(screen.getByText("WORKFLOW")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /inspect the repository/i }));
     await waitFor(() => expect(router.history.location.pathname).toBe("/runs/run-1"));
     expect(await screen.findByText("run-1")).toBeInTheDocument();
@@ -136,8 +142,12 @@ describe("router shell", () => {
   });
 
   test("routes launch and delete actions", async () => {
-    const { router, fetchMock } = setup("/runs");
-    render(<RouterProvider router={router} />);
+    const { router, fetchMock, queryClient } = setup("/runs");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
     await screen.findByRole("heading", { name: "Session traces" });
     fireEvent.change(screen.getByRole("textbox", { name: "Workflow request" }), {
       target: { value: "Launch this workflow" },
@@ -155,22 +165,30 @@ describe("router shell", () => {
   });
 
   test("renders an unavailable detail", async () => {
-    const { router, fetchMock } = setup("/runs/missing");
+    const { router, fetchMock, queryClient } = setup("/runs/missing");
     fetchMock.mockImplementation((input: RequestInfo | URL) =>
       String(input).includes("/trace")
         ? Promise.resolve(jsonResponse({ error: "missing" }, 404))
         : Promise.resolve(jsonResponse({ runs: [] })),
     );
-    render(<RouterProvider router={router} />);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
     expect(await screen.findByRole("heading", { name: "Run unavailable" })).toBeInTheDocument();
   });
 
   test("renders workspace plans and updates the selected plan detail", async () => {
-    const { router } = setup("/workspace");
-    render(<RouterProvider router={router} />);
+    const { router, queryClient } = setup("/workspace");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Selected" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Selected" })).toBeInTheDocument();
     const detail = screen.getByRole("region", { name: mockPlans[0].missionTitle });
     expect(
       within(detail).getByRole("heading", { name: mockPlans[0].missionTitle }),
@@ -188,7 +206,7 @@ describe("router shell", () => {
     ["empty", "No plan revisions yet"],
     ["error", "Plans could not be loaded"],
   ] as const)("renders the API-driven workspace %s state", async (state, expected) => {
-    const { router, fetchMock } = setup("/workspace");
+    const { router, fetchMock, queryClient } = setup("/workspace");
     fetchMock.mockImplementation((input: RequestInfo | URL) =>
       String(input).endsWith("/api/plans")
         ? state === "empty"
@@ -196,13 +214,17 @@ describe("router shell", () => {
           : Promise.resolve(jsonResponse({ error: "unavailable" }, 503))
         : Promise.resolve(jsonResponse({ runs: [run] })),
     );
-    render(<RouterProvider router={router} />);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
 
     expect(await screen.findByText(expected)).toBeInTheDocument();
   });
 
   test("renders an error for malformed successful plans data", async () => {
-    const { router, fetchMock } = setup("/workspace");
+    const { router, fetchMock, queryClient } = setup("/workspace");
     fetchMock.mockImplementation((input: RequestInfo | URL) =>
       String(input).endsWith("/api/plans")
         ? Promise.resolve(
@@ -212,7 +234,11 @@ describe("router shell", () => {
           )
         : Promise.resolve(jsonResponse({ runs: [run] })),
     );
-    render(<RouterProvider router={router} />);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
 
     expect(await screen.findByText("Plans could not be loaded")).toBeInTheDocument();
   });

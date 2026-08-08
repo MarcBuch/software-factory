@@ -1,12 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { useAppHeader } from "@/components/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { mapPlansResponse, type Plan } from "@/data/plans";
+import type { Plan } from "@/data/plans";
+import { planQuery } from "@/data/queries";
 
 const date = (value: string) =>
   new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }).format(
@@ -21,30 +22,17 @@ function Workspace() {
     "Workspace",
     "Durable plan revisions, milestones, and execution intent in one place.",
   );
-  const [plans, setPlans] = useState<Plan[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
-  const [state, setState] = useState<"loading" | "empty" | "error" | "populated">("loading");
-  useEffect(() => {
-    let active = true;
-    fetch("/api/plans")
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Plans API returned ${response.status}`);
-        return mapPlansResponse(await response.json());
-      })
-      .then((nextPlans) => {
-        if (!active) return;
-        setPlans(nextPlans);
-        setSelectedId((current) =>
-          current && nextPlans.some((plan) => plan.id === current) ? current : nextPlans[0]?.id,
-        );
-        setState(nextPlans.length === 0 ? "empty" : "populated");
-      })
-      .catch(() => active && setState("error"));
-    return () => {
-      active = false;
-    };
-  }, []);
-  const selected = plans.find((plan) => plan.id === selectedId);
+  const plansQuery = planQuery();
+  const plans = plansQuery.data ?? [];
+  const state = plansQuery.isPending
+    ? "loading"
+    : plansQuery.isError
+      ? "error"
+      : plans.length === 0
+        ? "empty"
+        : "populated";
+  const selected = plans.find((plan) => plan.id === selectedId) ?? plans[0];
   const lifecycle = ["approved", "draft", "superseded", "archived"] as const;
 
   if (state === "loading") return <WorkspaceLoading />;
@@ -99,7 +87,7 @@ function Workspace() {
             {plans.map((plan) => (
               <Card
                 key={plan.id}
-                className={plan.id === selectedId ? "border-primary shadow-md" : ""}
+                className={plan.id === selected?.id ? "border-primary shadow-md" : ""}
               >
                 <CardHeader>
                   <div className="flex items-start justify-between gap-3">
@@ -132,11 +120,11 @@ function Workspace() {
                   <div className="flex items-center justify-between border-t pt-4 text-xs text-muted-foreground">
                     <span>Updated {date(plan.updatedAt)}</span>
                     <Button
-                      variant={plan.id === selectedId ? "default" : "outline"}
+                      variant={plan.id === selected?.id ? "default" : "outline"}
                       size="sm"
                       onClick={() => setSelectedId(plan.id)}
                     >
-                      {plan.id === selectedId ? "Selected" : "View plan"}
+                      {plan.id === selected?.id ? "Selected" : "View plan"}
                     </Button>
                   </div>
                 </CardContent>

@@ -24,8 +24,8 @@ export const Route = createFileRoute("/runs")({
         onSelect={(id) => {
           void navigate({ to: "/runs/$runId", params: { runId: id } });
         }}
-        onMore={() => w.cursor && w.load(w.cursor)}
-        hasMore={!!w.cursor}
+        onMore={() => w.cursor !== undefined && w.load(w.cursor)}
+        hasMore={w.cursor !== undefined}
         launching={w.launching}
         onLaunch={w.launch}
       />
