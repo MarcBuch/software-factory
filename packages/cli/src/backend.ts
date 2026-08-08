@@ -1,5 +1,6 @@
-import type { AgentRosterEntry, TraceEvent } from "./workflow";
-import { TraceEventSchema } from "./workflow";
+import { TraceEventSchema, type TraceEvent } from "@software-factory/contracts";
+
+import type { AgentRosterEntry } from "./workflow";
 
 /** The deliberately small contract implemented by all workflow backends. */
 export type BackendInvocation = Readonly<{

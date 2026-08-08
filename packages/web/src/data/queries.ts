@@ -1,4 +1,14 @@
 import {
+  LaunchRequestSchema,
+  LaunchResponseSchema,
+  DeleteResponseSchema,
+  SessionsPageSchema,
+  TracePageSchema,
+  type Run,
+  type TraceEventApi,
+  type TraceSummary,
+} from "@software-factory/contracts";
+import {
   type InfiniteData,
   useInfiniteQuery,
   useMutation,
@@ -7,15 +17,13 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
-import type { Event, Run, TraceSummary } from "@/workflow/workflow-context";
-
-import { api } from "./api";
+import { api, apiSchema } from "./api";
 import { mapPlansResponse, type Plan } from "./plans";
 
 export type SessionsPage = { runs: Run[]; nextCursor?: number };
 export type TracePage = {
   runId: string;
-  events: Event[];
+  events: TraceEventApi[];
   nextCursor?: number;
   hasMore: boolean;
   summary: TraceSummary;
@@ -52,8 +60,9 @@ export function useSessions() {
     queryKey: sessionQueryKey,
     initialPageParam: undefined as number | undefined,
     queryFn: ({ pageParam, signal }) =>
-      api<SessionsPage>(
+      apiSchema(
         `/api/sessions?limit=30${pageParam !== undefined ? `&before=${pageParam}` : ""}`,
+        SessionsPageSchema,
         { signal },
       ),
     getNextPageParam: (page) => page.nextCursor,
@@ -72,8 +81,9 @@ export function useTrace(id: string) {
     enabled: !!id,
     initialPageParam: undefined as number | undefined,
     queryFn: ({ pageParam, signal }) =>
-      api<TracePage>(
+      apiSchema(
         `/api/sessions/${encodeURIComponent(id)}/trace?limit=500${pageParam !== undefined ? `&after=${pageParam}` : ""}`,
+        TracePageSchema,
         { signal },
       ),
     getNextPageParam: (page) => (page.hasMore ? page.nextCursor : undefined),
@@ -81,7 +91,7 @@ export function useTrace(id: string) {
       ...data,
       events: data.pages
         .flatMap((page) => page.events)
-        .reduce<Event[]>((events, event) => {
+        .reduce<TraceEventApi[]>((events, event) => {
           if (event.id === undefined || !events.some((existing) => existing.id === event.id))
             events.push(event);
           return events;
@@ -99,10 +109,10 @@ export function useLaunch() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (input: { request: string; agentName: LaunchAgent }) =>
-      api<{ accepted: true; run: Run }>("/api/sessions", {
+      apiSchema("/api/sessions", LaunchResponseSchema, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify(LaunchRequestSchema.parse(input)),
       }),
     onSuccess: (response) => {
       updateSessions(client, response.run);
@@ -114,7 +124,9 @@ export function useDelete() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (id: string) =>
-      api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      apiSchema(`/api/sessions/${encodeURIComponent(id)}`, DeleteResponseSchema, {
+        method: "DELETE",
+      }),
     onSuccess: (_, id) => {
       client.removeQueries({ queryKey: ["trace", id] });
       client.setQueryData<InfiniteData<SessionsPage>>(sessionQueryKey, (data) =>

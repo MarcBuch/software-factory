@@ -93,7 +93,8 @@ function setup(initialEntry = "/runs") {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (init?.method === "POST") return Promise.resolve(jsonResponse({ accepted: true, run }));
-    if (init?.method === "DELETE") return Promise.resolve(jsonResponse({ deleted: true }));
+    if (init?.method === "DELETE")
+      return Promise.resolve(jsonResponse({ deleted: true, runId: "run-1" }));
     if (path.includes("/trace"))
       return Promise.resolve(
         jsonResponse({ runId: "run-1", events: [], hasMore: false, summary, publicRun: run }),

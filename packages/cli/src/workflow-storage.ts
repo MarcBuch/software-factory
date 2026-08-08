@@ -6,10 +6,11 @@ import { join } from "node:path";
 import {
   RunSchema,
   TraceEventSchema,
-  type AgentResult,
   type Run,
   type TraceEvent,
-} from "./workflow";
+} from "@software-factory/contracts";
+
+import type { AgentResult } from "./workflow";
 
 const mode = 0o600;
 const privateMode = 0o700;
@@ -24,7 +25,7 @@ export type RunFiles = {
   metadata: string;
 };
 
-export type RunRecord = Run & {
+export type RunRecord = Omit<Run, "metadata"> & {
   repositoryRoot: string;
   files: RunFiles;
   childPid?: number;

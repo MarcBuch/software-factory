@@ -24,6 +24,7 @@
         "factory": "src/index.ts",
       },
       "dependencies": {
+        "@software-factory/contracts": "workspace:*",
         "commander": "^14.0.0",
         "zod": "^4.0.0",
       },
@@ -32,11 +33,19 @@
         "typescript": "^5.0.0",
       },
     },
+    "packages/contracts": {
+      "name": "@software-factory/contracts",
+      "version": "0.1.0",
+      "dependencies": {
+        "zod": "^4.0.0",
+      },
+    },
     "packages/web": {
       "name": "@software-factory/web",
       "dependencies": {
         "@radix-ui/react-separator": "latest",
         "@radix-ui/react-slot": "latest",
+        "@software-factory/contracts": "workspace:*",
         "@tanstack/react-query": "latest",
         "@tanstack/react-router": "^1.170.22",
         "@tanstack/router-plugin": "^1.168.27",
@@ -363,6 +372,8 @@
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
 
     "@software-factory/cli": ["@software-factory/cli@workspace:packages/cli"],
+
+    "@software-factory/contracts": ["@software-factory/contracts@workspace:packages/contracts"],
 
     "@software-factory/web": ["@software-factory/web@workspace:packages/web"],
 

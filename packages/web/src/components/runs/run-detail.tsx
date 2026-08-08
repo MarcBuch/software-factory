@@ -179,7 +179,7 @@ export function Detail({
                 </div>
                 {e.tool && <strong className="tool">{e.tool}</strong>}
                 {e.message && <p>{e.message}</p>}
-                {e.result?.summary && <p>{e.result.summary}</p>}
+                {typeof e.result?.summary === "string" && <p>{e.result.summary}</p>}
                 {(e.input !== undefined || e.output !== undefined) && (
                   <div className="io">
                     <details>

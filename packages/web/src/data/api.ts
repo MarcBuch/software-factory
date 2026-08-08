@@ -20,3 +20,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new ApiError(responseError(await response.text()), response.status);
   return response.json();
 }
+
+export async function apiSchema<T>(
+  path: string,
+  schema: { parse: (value: unknown) => T },
+  init?: RequestInit,
+) {
+  return schema.parse(await api<unknown>(path, init));
+}

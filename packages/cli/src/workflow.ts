@@ -1,9 +1,17 @@
+import {
+  CostSchema,
+  RunFailureSchema,
+  RunSchema,
+  TokenUsageSchema,
+  TraceEventSchema,
+} from "@software-factory/contracts";
 import { z } from "zod";
 
 import { PlanInputSchema } from "./plans";
 
+export { CostSchema, RunFailureSchema, RunSchema, TokenUsageSchema, TraceEventSchema };
+
 const nonEmptyText = z.string().trim().min(1);
-const timestamp = z.string().datetime({ offset: true });
 
 /** A path that cannot escape the repository root (paths are normalized to `/`). */
 export const RepositoryRelativePathSchema = z
@@ -51,110 +59,6 @@ export const AgentResultSchema = z
   })
   .strict();
 
-export const RunFailureSchema = z
-  .object({
-    code: nonEmptyText,
-    message: nonEmptyText,
-    failureCode: nonEmptyText.optional(),
-    retryable: z.boolean().optional(),
-  })
-  .strict();
-
-export const RunSchema = z
-  .object({
-    id: nonEmptyText,
-    status: z.enum(["pending", "running", "succeeded", "failed", "cancelled"]),
-    startedAt: timestamp.optional(),
-    finishedAt: timestamp.optional(),
-    failure: RunFailureSchema.optional(),
-  })
-  .strict()
-  .superRefine((run, context) => {
-    if (run.status === "pending" && (run.startedAt || run.finishedAt || run.failure))
-      context.addIssue({ code: "custom", message: "Pending runs cannot have lifecycle details" });
-    if (run.status === "running" && (!run.startedAt || run.finishedAt || run.failure))
-      context.addIssue({ code: "custom", message: "Running runs require startedAt only" });
-    if (run.status === "succeeded" && (!run.startedAt || !run.finishedAt || run.failure))
-      context.addIssue({
-        code: "custom",
-        message: "Succeeded runs require timestamps and no failure",
-      });
-    if (run.status === "failed" && (!run.startedAt || !run.finishedAt || !run.failure))
-      context.addIssue({ code: "custom", message: "Failed runs require timestamps and failure" });
-    if (run.status === "cancelled" && (!run.startedAt || !run.finishedAt || run.failure))
-      context.addIssue({
-        code: "custom",
-        message: "Cancelled runs require timestamps and no failure",
-      });
-    if (run.startedAt && run.finishedAt && Date.parse(run.finishedAt) < Date.parse(run.startedAt))
-      context.addIssue({ code: "custom", message: "finishedAt must be >= startedAt" });
-  });
-
-export const TokenUsageSchema = z
-  .object({
-    input: z.number().nonnegative(),
-    output: z.number().nonnegative(),
-    reasoning: z.number().nonnegative().optional(),
-    cacheRead: z.number().nonnegative().optional(),
-    cacheWrite: z.number().nonnegative().optional(),
-    total: z.number().nonnegative(),
-  })
-  .strict()
-  .superRefine((usage, context) => {
-    if (
-      usage.total !==
-      usage.input +
-        usage.output +
-        (usage.reasoning ?? 0) +
-        (usage.cacheRead ?? 0) +
-        (usage.cacheWrite ?? 0)
-    )
-      context.addIssue({ code: "custom", message: "total must equal all token categories" });
-  });
-export const CostSchema = z
-  .object({ amount: z.number().nonnegative(), currency: nonEmptyText })
-  .strict();
-
-const TraceBase = z.object({ runId: nonEmptyText, at: timestamp }).strict();
-const ToolSpanFields = z.object({
-  /** Stable backend/tool invocation identity when the backend provides one. */
-  spanId: nonEmptyText.optional(),
-  /** `start`/`finish` makes tool_call usable as a span without breaking old records. */
-  phase: z.enum(["start", "finish"]).optional(),
-});
-const terminalRunStatus = z.enum(["succeeded", "failed", "cancelled"]);
-const TraceEvent = z.discriminatedUnion("type", [
-  TraceBase.extend({ type: z.literal("run_started") }),
-  TraceBase.extend({ type: z.literal("run_finished"), status: terminalRunStatus }),
-  TraceBase.extend({ type: z.literal("agent_started"), agentName: nonEmptyText }),
-  TraceBase.extend({
-    type: z.literal("agent_finished"),
-    agentName: nonEmptyText,
-    result: AgentResultSchema,
-  }),
-  TraceBase.extend({
-    type: z.literal("tool_call"),
-    agentName: nonEmptyText,
-    tool: nonEmptyText,
-    input: z.unknown().optional(),
-    output: z.unknown().optional(),
-    ...ToolSpanFields.shape,
-  }),
-  TraceBase.extend({
-    type: z.literal("model_step"),
-    agentName: nonEmptyText,
-  }),
-  TraceBase.extend({
-    type: z.literal("error"),
-    message: nonEmptyText,
-    code: nonEmptyText.optional(),
-    agentName: nonEmptyText.optional(),
-  }),
-]);
-export const TraceEventSchema = TraceEvent.and(
-  z.object({ usage: TokenUsageSchema.optional(), cost: CostSchema.optional() }).strict(),
-);
-
 export const BackendInvocationSchema = z
   .object({
     agent: AgentRosterEntrySchema,
@@ -174,7 +78,5 @@ export type WorkflowInput = z.infer<typeof WorkflowInputSchema>;
 export type AgentRosterEntry = z.infer<typeof AgentRosterEntrySchema>;
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
 export type AgentResult = z.infer<typeof AgentResultSchema>;
-export type Run = z.infer<typeof RunSchema>;
-export type TraceEvent = z.infer<typeof TraceEventSchema>;
 export type BackendInvocation = z.infer<typeof BackendInvocationSchema>;
 export type BackendResult = z.infer<typeof BackendResultSchema>;

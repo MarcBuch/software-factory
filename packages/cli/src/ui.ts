@@ -190,10 +190,7 @@ export async function startUiServer(options: UiServerOptions) {
           );
           return json({
             runId,
-            events: page.events.map(({ runId: _runId, ...event }, index) => ({
-              ...event,
-              id: page.events[index]!.id,
-            })),
+            events: page.events.map((event) => ({ ...event, id: event.id })),
             nextCursor: page.nextCursor,
             hasMore: page.hasMore,
             summary,

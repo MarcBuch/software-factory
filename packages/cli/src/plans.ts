@@ -4,59 +4,33 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  PlanInputSchema,
+  PlanSchema,
+  PlanStatus,
+  PlanStepSchema,
+  RichSectionSchema,
+  AlternativeSchema,
+  RiskSchema,
+  type Plan,
+  type PlanInput,
+} from "@software-factory/contracts";
 import { z } from "zod";
 
 import { withFactoryLock } from "./storage";
 const exec = promisify(execFile);
 
-const iso = z.string().datetime({ offset: true });
-const text = z.string().trim().min(1);
-const planId = z.string().regex(/^pln_[A-Za-z0-9]+$/);
+export {
+  AlternativeSchema,
+  PlanInputSchema,
+  PlanSchema,
+  PlanStatus,
+  PlanStepSchema,
+  RichSectionSchema,
+  RiskSchema,
+};
+export type { Plan, PlanRevision, PlanInput } from "@software-factory/contracts";
 
-export const PlanStatus = z.enum(["draft", "approved", "superseded", "archived"]);
-
-export const AlternativeSchema = z.object({ name: text, rejectedBecause: text }).strict();
-export const RiskSchema = z.object({ description: text, mitigation: text }).strict();
-export const RichSectionSchema = z
-  .object({
-    context: text,
-    intent: text,
-    approach: text,
-    executionDesign: text,
-    implementationDetails: text,
-    alternatives: z.array(AlternativeSchema),
-    risks: z.array(RiskSchema),
-    acceptance: z.array(text),
-  })
-  .strict();
-
-export const PlanStepSchema = z
-  .object({
-    key: text,
-    milestoneKey: text,
-    title: text,
-    type: z.enum(["implementation", "verification"]),
-    risk: z.enum(["low", "medium", "high"]),
-    verification: text,
-    executionNotes: text.optional(),
-    inputs: z.array(text).optional(),
-    invariants: z.array(text).optional(),
-    outcomes: z.array(text).optional(),
-    dependsOn: z.array(text),
-  })
-  .strict();
-
-/** The only fields accepted from plan authors (storage/lifecycle fields are internal). */
-export const PlanInputSchema = z
-  .object({
-    missionTitle: text,
-    verificationMode: z.enum(["fast", "standard", "exhaustive"]),
-    sections: RichSectionSchema,
-    milestones: z.array(z.object({ key: text, title: text }).strict()),
-    steps: z.array(PlanStepSchema),
-  })
-  .strict();
-export type PlanInput = z.infer<typeof PlanInputSchema>;
 export const PLAN_INPUT_EXAMPLE: PlanInput = {
   missionTitle: "Ship the feature",
   verificationMode: "standard",
@@ -84,52 +58,7 @@ export const PLAN_INPUT_EXAMPLE: PlanInput = {
   ],
 };
 
-const approval = <T extends z.ZodObject<any>>(schema: T) =>
-  schema.superRefine((value: any, ctx) => {
-    const hasApproval = value.approvedAt !== undefined;
-    if ((value.status === "approved" || value.status === "superseded") && !hasApproval)
-      ctx.addIssue({
-        code: "custom",
-        path: ["approvedAt"],
-        message: "approvedAt is required for approved or superseded records",
-      });
-    if ((value.status === "draft" || value.status === "archived") && hasApproval)
-      ctx.addIssue({
-        code: "custom",
-        path: ["approvedAt"],
-        message: "approvedAt is only valid for approved or superseded records",
-      });
-    if (value.updatedAt < value.createdAt)
-      ctx.addIssue({
-        code: "custom",
-        path: ["updatedAt"],
-        message: "updatedAt must be >= createdAt",
-      });
-  });
-
-export const PlanRevisionSchema = approval(
-  z
-    .object({
-      id: planId,
-      missionTitle: text,
-      verificationMode: z.enum(["fast", "standard", "exhaustive"]),
-      milestones: z.array(z.object({ key: text, title: text }).strict()),
-      revision: z.number().int().min(1),
-      status: PlanStatus,
-      sections: RichSectionSchema,
-      steps: z.array(PlanStepSchema),
-      createdAt: iso,
-      updatedAt: iso,
-      approvedAt: iso.optional(),
-    })
-    .strict(),
-);
-
-// A plan revision is the durable plan record. The alias keeps the public model
-// convenient while revisions remain explicit for lifecycle commands.
-export const PlanSchema = PlanRevisionSchema;
-export type Plan = z.infer<typeof PlanSchema>;
-export type PlanRevision = z.infer<typeof PlanRevisionSchema>;
+export const PlanRevisionSchema = PlanSchema;
 
 export async function createDraftPlan(input: PlanInput, file: string): Promise<Plan> {
   return withFactoryLock(async () => {

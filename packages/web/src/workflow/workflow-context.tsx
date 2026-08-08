@@ -1,3 +1,4 @@
+import type { Run, TraceEventApi, TraceSummary } from "@software-factory/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
@@ -12,46 +13,8 @@ import {
 } from "@/data/queries";
 export type { LaunchAgent } from "@/data/queries";
 
-export type Run = {
-  id: string;
-  status: string;
-  startedAt?: string;
-  finishedAt?: string;
-  metadata?: unknown;
-  failure?: { message: string };
-};
-export type Event = {
-  id?: number;
-  type: string;
-  at: string;
-  agentName?: string;
-  tool?: string;
-  input?: unknown;
-  output?: unknown;
-  usage?: {
-    input: number;
-    output: number;
-    reasoning?: number;
-    cacheRead?: number;
-    cacheWrite?: number;
-    total: number;
-  };
-  cost?: { amount: number; currency: string };
-  result?: { summary: string };
-  message?: string;
-  phase?: string;
-};
-export type TraceSummary = {
-  usage: {
-    input: number;
-    output: number;
-    reasoning: number;
-    cacheRead: number;
-    cacheWrite: number;
-    total: number;
-  };
-  cost: number;
-};
+export type Event = TraceEventApi;
+export type { Run, TraceSummary };
 type State = {
   runs: Run[];
   cursor?: number;
