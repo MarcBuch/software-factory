@@ -1,0 +1,58 @@
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+
+import { PlanDetail } from "@/components/plans/plan-detail";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { planQuery } from "@/data/queries";
+
+function PlanRoute() {
+  const { planId } = Route.useParams();
+  const navigate = useNavigate();
+  const query = planQuery();
+  const back = () => void navigate({ to: "/workspace", replace: true });
+  if (query.isPending)
+    return (
+      <div role="status" aria-busy="true" aria-label="Loading plan">
+        <Skeleton className="h-96" />
+      </div>
+    );
+  if (query.isError)
+    return (
+      <State
+        title="Plans could not be loaded"
+        message="The plans API returned an error."
+        onBack={back}
+      />
+    );
+  const plan = query.data?.find((item) => item.id === planId);
+  if (!plan)
+    return (
+      <State
+        title="Plan unavailable"
+        message="This plan revision could not be found."
+        onBack={back}
+      />
+    );
+  return (
+    <div className="space-y-4">
+      <Button variant="outline" onClick={back}>
+        Back to workspace
+      </Button>
+      <PlanDetail plan={plan} />
+    </div>
+  );
+}
+function State({ title, message, onBack }: { title: string; message: string; onBack: () => void }) {
+  return (
+    <div className="space-y-4">
+      <Button variant="outline" onClick={onBack}>
+        Back to workspace
+      </Button>
+      <div role="alert" className="rounded-lg border p-8 text-center">
+        <h2 className="text-lg font-semibold">{title}</h2>
+        <p className="mt-2 text-sm text-muted-foreground">{message}</p>
+      </div>
+    </div>
+  );
+}
+export const Route = createFileRoute("/workspace/$planId")({ component: PlanRoute });

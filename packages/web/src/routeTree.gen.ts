@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as RunsRouteImport } from './routes/runs'
 import { Route as WorkspaceRouteImport } from './routes/workspace'
 import { Route as RunsRunIdRouteImport } from './routes/runs.$runId'
+import { Route as WorkspacePlanIdRouteImport } from './routes/workspace.$planId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -34,38 +35,53 @@ const RunsRunIdRoute = RunsRunIdRouteImport.update({
   path: '/$runId',
   getParentRoute: () => RunsRoute,
 } as any)
+const WorkspacePlanIdRoute = WorkspacePlanIdRouteImport.update({
+  id: '/$planId',
+  path: '/$planId',
+  getParentRoute: () => WorkspaceRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/runs': typeof RunsRouteWithChildren
-  '/workspace': typeof WorkspaceRoute
+  '/workspace': typeof WorkspaceRouteWithChildren
   '/runs/$runId': typeof RunsRunIdRoute
+  '/workspace/$planId': typeof WorkspacePlanIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/runs': typeof RunsRouteWithChildren
-  '/workspace': typeof WorkspaceRoute
+  '/workspace': typeof WorkspaceRouteWithChildren
   '/runs/$runId': typeof RunsRunIdRoute
+  '/workspace/$planId': typeof WorkspacePlanIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/runs': typeof RunsRouteWithChildren
-  '/workspace': typeof WorkspaceRoute
+  '/workspace': typeof WorkspaceRouteWithChildren
   '/runs/$runId': typeof RunsRunIdRoute
+  '/workspace/$planId': typeof WorkspacePlanIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/runs' | '/workspace' | '/runs/$runId'
+  fullPaths:
+    '/' | '/runs' | '/workspace' | '/runs/$runId' | '/workspace/$planId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/runs' | '/workspace' | '/runs/$runId'
-  id: '__root__' | '/' | '/runs' | '/workspace' | '/runs/$runId'
+  to: '/' | '/runs' | '/workspace' | '/runs/$runId' | '/workspace/$planId'
+  id:
+    | '__root__'
+    | '/'
+    | '/runs'
+    | '/workspace'
+    | '/runs/$runId'
+    | '/workspace/$planId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   RunsRoute: typeof RunsRouteWithChildren
-  WorkspaceRoute: typeof WorkspaceRoute
+  WorkspaceRoute: typeof WorkspaceRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -98,6 +114,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RunsRunIdRouteImport
       parentRoute: typeof RunsRoute
     }
+    '/workspace/$planId': {
+      id: '/workspace/$planId'
+      path: '/$planId'
+      fullPath: '/workspace/$planId'
+      preLoaderRoute: typeof WorkspacePlanIdRouteImport
+      parentRoute: typeof WorkspaceRoute
+    }
   }
 }
 
@@ -111,10 +134,22 @@ const RunsRouteChildren: RunsRouteChildren = {
 
 const RunsRouteWithChildren = RunsRoute._addFileChildren(RunsRouteChildren)
 
+interface WorkspaceRouteChildren {
+  WorkspacePlanIdRoute: typeof WorkspacePlanIdRoute
+}
+
+const WorkspaceRouteChildren: WorkspaceRouteChildren = {
+  WorkspacePlanIdRoute: WorkspacePlanIdRoute,
+}
+
+const WorkspaceRouteWithChildren = WorkspaceRoute._addFileChildren(
+  WorkspaceRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   RunsRoute: RunsRouteWithChildren,
-  WorkspaceRoute: WorkspaceRoute,
+  WorkspaceRoute: WorkspaceRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

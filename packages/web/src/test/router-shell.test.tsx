@@ -180,7 +180,7 @@ describe("router shell", () => {
     expect(await screen.findByRole("heading", { name: "Run unavailable" })).toBeInTheDocument();
   });
 
-  test("renders workspace plans and updates the selected plan detail", async () => {
+  test("navigates to a dedicated plan detail and preserves browser back", async () => {
     const { router, queryClient } = setup("/workspace");
     render(
       <QueryClientProvider client={queryClient}>
@@ -189,18 +189,54 @@ describe("router shell", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Selected" })).toBeInTheDocument();
-    const detail = screen.getByRole("region", { name: mockPlans[0].missionTitle });
+    fireEvent.click((await screen.findAllByRole("button", { name: "View plan" }))[0]);
+
+    await waitFor(() => expect(router.history.location.pathname).toBe("/workspace/pln_one"));
     expect(
-      within(detail).getByRole("heading", { name: mockPlans[0].missionTitle }),
+      await screen.findByRole("heading", { name: mockPlans[0].missionTitle }),
     ).toBeInTheDocument();
-    expect(within(detail).getByText(mockPlans[0].sections.intent)).toBeInTheDocument();
+    expect(screen.queryByText("Plan revisions")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /workspace/i })).toHaveAttribute("data-active", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+    await waitFor(() => expect(router.history.location.pathname).toBe("/workspace"));
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "View plan" }));
+  test("preserves browser back from a plan detail", async () => {
+    const { router, queryClient } = setup("/workspace");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
 
-    expect(await within(detail).findByText(mockPlans[1].sections.intent)).toBeInTheDocument();
-    expect(within(detail).queryByText(mockPlans[0].sections.intent)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Selected" })).toBeInTheDocument();
+    fireEvent.click((await screen.findAllByRole("button", { name: "View plan" }))[0]);
+    await waitFor(() => expect(router.history.location.pathname).toBe("/workspace/pln_one"));
+    router.history.back();
+    await waitFor(() => expect(router.history.location.pathname).toBe("/workspace"));
+    expect(await screen.findByText("Plan revisions")).toBeInTheDocument();
+  });
+
+  test("renders a direct plan detail route", async () => {
+    const { router, queryClient } = setup("/workspace/pln_two");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    expect(
+      await screen.findByRole("heading", { name: mockPlans[1].missionTitle }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(mockPlans[1].sections.intent)).toBeInTheDocument();
+  });
+
+  test("renders an unavailable plan detail", async () => {
+    const { router, queryClient } = setup("/workspace/missing");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Plan unavailable" })).toBeInTheDocument();
   });
 
   test.each([

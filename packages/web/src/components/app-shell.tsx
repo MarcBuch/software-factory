@@ -44,12 +44,7 @@ function Navigation() {
     <SidebarMenu>
       <SidebarMenuItem>
         <SidebarMenuButton asChild tooltip="Workspace">
-          <Link
-            to="/workspace"
-            activeOptions={{ exact: true }}
-            activeProps={{ "data-active": true }}
-            onClick={close}
-          >
+          <Link to="/workspace" activeProps={{ "data-active": true }} onClick={close}>
             <FolderKanban />
             <span>Workspace</span>
           </Link>
