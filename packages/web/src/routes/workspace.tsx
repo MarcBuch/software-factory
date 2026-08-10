@@ -1,4 +1,11 @@
 import { createFileRoute, Outlet, useMatches, useNavigate } from "@tanstack/react-router";
+import {
+  columnVisibilityFeature,
+  flexRender,
+  tableFeatures,
+  useTable,
+  type ColumnDef,
+} from "@tanstack/react-table";
 
 import { useAppHeader } from "@/components/app-shell";
 import { Badge } from "@/components/ui/badge";
@@ -83,53 +90,7 @@ function Workspace() {
             message="When plans are created, their revisions will appear here."
           />
         ) : (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {plans.map((plan) => (
-              <Card key={plan.id}>
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <CardTitle>{plan.missionTitle}</CardTitle>
-                      <CardDescription className="mt-2 font-mono text-xs">
-                        {plan.id}
-                      </CardDescription>
-                    </div>
-                    <Badge variant={statusVariant(plan.status)}>{plan.status}</Badge>
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-3 gap-3 text-sm">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Revision</p>
-                      <p className="font-medium">v{plan.revision}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Verification</p>
-                      <p className="font-medium capitalize">{plan.verificationMode}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Scope</p>
-                      <p className="font-medium">
-                        {plan.milestones.length} milestones · {plan.steps.length} steps
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between border-t pt-4 text-xs text-muted-foreground">
-                    <span>Updated {date(plan.updatedAt)}</span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        void navigate({ to: "/workspace/$planId", params: { planId: plan.id } })
-                      }
-                    >
-                      View plan
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+          <PlansTable plans={plans} navigate={navigate} />
         )}
       </section>
     </div>
@@ -201,6 +162,100 @@ function PlanCardSkeleton() {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function PlansTable({
+  plans,
+  navigate,
+}: {
+  plans: Plan[];
+  navigate: ReturnType<typeof useNavigate>;
+}) {
+  const features = tableFeatures({ columnVisibilityFeature });
+  const columns: ColumnDef<typeof features, Plan>[] = [
+    {
+      accessorKey: "missionTitle",
+      header: "Title",
+      cell: ({ row }) => (
+        <div className="min-w-48">
+          <div className="font-medium">{row.original.missionTitle}</div>
+          <div className="font-mono text-xs text-muted-foreground">{row.original.id}</div>
+        </div>
+      ),
+    },
+    {
+      accessorKey: "status",
+      header: "Status",
+      cell: ({ row }) => (
+        <Badge variant={statusVariant(row.original.status)}>{row.original.status}</Badge>
+      ),
+    },
+    {
+      accessorKey: "updatedAt",
+      header: "Updated",
+      cell: ({ row }) => date(row.original.updatedAt),
+    },
+    {
+      id: "action",
+      header: () => <span className="sr-only">Actions</span>,
+      cell: ({ row }) => (
+        <Button
+          aria-label={`View plan: ${row.original.missionTitle}`}
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            void navigate({ to: "/workspace/$planId", params: { planId: row.original.id } })
+          }
+        >
+          View plan
+        </Button>
+      ),
+    },
+  ];
+  const table = useTable({
+    features,
+    data: plans,
+    columns,
+    getRowId: (plan) => plan.id,
+  });
+
+  return (
+    <div
+      className="overflow-x-auto rounded-lg border bg-white dark:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      role="region"
+      aria-label="Scrollable plan revisions"
+      tabIndex={0}
+    >
+      <table className="w-full min-w-[900px] caption-bottom text-sm">
+        <caption className="sr-only">Plan revisions</caption>
+        <thead className="bg-muted/50">
+          {table.getHeaderGroups().map((headerGroup) => (
+            <tr key={headerGroup.id}>
+              {headerGroup.headers.map((header) => (
+                <th
+                  key={header.id}
+                  className="h-11 whitespace-nowrap px-4 text-left align-middle font-medium text-muted-foreground"
+                >
+                  {flexRender(header.column.columnDef.header, header.getContext())}
+                </th>
+              ))}
+            </tr>
+          ))}
+        </thead>
+        <tbody>
+          {table.getRowModel().rows.map((row) => (
+            <tr key={row.id} className="border-t transition-colors hover:bg-muted/50">
+              {row.getVisibleCells().map((cell) => (
+                <td key={cell.id} className="whitespace-nowrap px-4 py-4 align-middle">
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

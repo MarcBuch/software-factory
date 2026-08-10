@@ -15,6 +15,7 @@
     "@software-factory/contracts": "workspace:*",
     "@tanstack/react-query": "latest",
     "@tanstack/react-router": "^1.170.22",
+    "@tanstack/react-table": "^9.1.2",
     "@tanstack/router-plugin": "^1.168.27",
     "@vitejs/plugin-react": "latest",
     "class-variance-authority": "^0.7.1",

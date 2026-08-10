@@ -189,7 +189,26 @@ describe("router shell", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
-    fireEvent.click((await screen.findAllByRole("button", { name: "View plan" }))[0]);
+    expect(await screen.findByRole("table", { name: "Plan revisions" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Scrollable plan revisions" })).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
+    expect(screen.getByRole("columnheader", { name: "Title" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
+    const firstPlanRow = screen.getByRole("row", { name: /first plan/i });
+    const secondPlanRow = screen.getByRole("row", { name: /second plan/i });
+    const updatedDate = new Intl.DateTimeFormat("en", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date(mockPlans[0].updatedAt));
+    expect(within(firstPlanRow).getByText("First plan")).toBeInTheDocument();
+    expect(within(firstPlanRow).getByText("pln_one")).toBeInTheDocument();
+    expect(within(firstPlanRow).getByText("approved")).toBeInTheDocument();
+    expect(within(firstPlanRow).getByText(updatedDate)).toBeInTheDocument();
+    expect(within(secondPlanRow).getByText("draft")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View plan: First plan" }));
 
     await waitFor(() => expect(router.history.location.pathname).toBe("/workspace/pln_one"));
     expect(
@@ -209,11 +228,11 @@ describe("router shell", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click((await screen.findAllByRole("button", { name: "View plan" }))[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "View plan: First plan" }));
     await waitFor(() => expect(router.history.location.pathname).toBe("/workspace/pln_one"));
     router.history.back();
     await waitFor(() => expect(router.history.location.pathname).toBe("/workspace"));
-    expect(await screen.findByText("Plan revisions")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Plan revisions" })).toBeInTheDocument();
   });
 
   test("renders a direct plan detail route", async () => {
@@ -258,6 +277,28 @@ describe("router shell", () => {
     );
 
     expect(await screen.findByText(expected)).toBeInTheDocument();
+  });
+
+  test("renders the workspace loading state before plans resolve", async () => {
+    const { router, fetchMock, queryClient } = setup("/workspace");
+    let resolvePlans!: (response: Response) => void;
+    const plansResponse = new Promise<Response>((resolve) => {
+      resolvePlans = resolve;
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) =>
+      String(input).endsWith("/api/plans")
+        ? plansResponse
+        : Promise.resolve(jsonResponse({ runs: [run] })),
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByLabelText("Loading workspace")).toHaveAttribute("aria-busy", "true");
+    resolvePlans(jsonResponse(mockPlans));
+    expect(await screen.findByRole("table", { name: "Plan revisions" })).toBeInTheDocument();
   });
 
   test("renders an error for malformed successful plans data", async () => {
