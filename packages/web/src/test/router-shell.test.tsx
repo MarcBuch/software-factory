@@ -90,18 +90,20 @@ function setup(initialEntry = "/runs") {
   MockEventSource.instances = [];
   window.history.replaceState({}, "", initialEntry);
   vi.stubGlobal("EventSource", MockEventSource);
-  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-    const path = String(input);
-    if (init?.method === "POST") return Promise.resolve(jsonResponse({ accepted: true, run }));
-    if (init?.method === "DELETE")
-      return Promise.resolve(jsonResponse({ deleted: true, runId: "run-1" }));
-    if (path.includes("/trace"))
-      return Promise.resolve(
-        jsonResponse({ runId: "run-1", events: [], hasMore: false, summary, publicRun: run }),
-      );
-    if (path.endsWith("/api/plans")) return Promise.resolve(jsonResponse(mockPlans));
-    return Promise.resolve(jsonResponse({ runs: [run] }));
-  });
+  const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+    (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (init?.method === "POST") return Promise.resolve(jsonResponse({ accepted: true, run }));
+      if (init?.method === "DELETE")
+        return Promise.resolve(jsonResponse({ deleted: true, runId: "run-1" }));
+      if (path.includes("/trace"))
+        return Promise.resolve(
+          jsonResponse({ runId: "run-1", events: [], hasMore: false, summary, publicRun: run }),
+        );
+      if (path.endsWith("/api/plans")) return Promise.resolve(jsonResponse(mockPlans));
+      return Promise.resolve(jsonResponse({ runs: [run] }));
+    },
+  );
   vi.stubGlobal("fetch", fetchMock);
   const history = createMemoryHistory({ initialEntries: [initialEntry] });
   const router = createRouter({ routeTree, history });
@@ -190,10 +192,9 @@ describe("router shell", () => {
 
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(await screen.findByRole("table", { name: "Plan revisions" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Scrollable plan revisions" })).toHaveAttribute(
-      "tabindex",
-      "0",
-    );
+    const tableScroller = screen.getByRole("region", { name: "Scrollable plan revisions" });
+    expect(tableScroller).toBeInTheDocument();
+    expect(tableScroller).toHaveAttribute("tabindex", "0");
     expect(screen.getByRole("columnheader", { name: "Title" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
     const firstPlanRow = screen.getByRole("row", { name: /first plan/i });
@@ -246,6 +247,35 @@ describe("router shell", () => {
       await screen.findByRole("heading", { name: mockPlans[1].missionTitle }),
     ).toBeInTheDocument();
     expect(screen.getByText(mockPlans[1].sections.intent)).toBeInTheDocument();
+  });
+
+  test("announces a pending plan detail without an aria-busy ancestor", async () => {
+    const { router, fetchMock, queryClient } = setup("/workspace/pln_two");
+    let resolvePlans!: (response: Response) => void;
+    const plansResponse = new Promise<Response>((resolve) => {
+      resolvePlans = resolve;
+    });
+    fetchMock.mockImplementation((input: RequestInfo | URL) =>
+      String(input).endsWith("/api/plans")
+        ? plansResponse
+        : Promise.resolve(jsonResponse({ runs: [run] })),
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    const status = await screen.findByText("Loading plan");
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveTextContent("Loading plan");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status.closest("[aria-busy='true']")).toBeNull();
+    resolvePlans(jsonResponse(mockPlans));
+    expect(
+      await screen.findByRole("heading", { name: mockPlans[1].missionTitle }),
+    ).toBeInTheDocument();
+    expect(router.history.location.pathname).toBe("/workspace/pln_two");
   });
 
   test("renders an unavailable plan detail", async () => {

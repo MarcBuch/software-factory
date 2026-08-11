@@ -10,7 +10,7 @@
     "test": "bun test packages/cli/test/cli.test.ts",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
-    "lint": "oxlint packages/cli/src",
+    "lint": "oxlint packages/cli/src packages/web/src",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run build"
   },
   "dependencies": {

@@ -8,8 +8,9 @@ export const Route = createFileRoute("/runs/$runId")({
   component: () => {
     const { runId } = Route.useParams();
     const w = useWorkflow();
+    const { setSelected } = w;
     const navigate = useNavigate();
-    useEffect(() => w.setSelected(runId), [runId]);
+    useEffect(() => setSelected(runId), [runId, setSelected]);
     const agents = Array.from(new Set(w.trace.map((e) => e.agentName).filter(Boolean) as string[]));
     if (w.selected !== runId) return <p className="muted">Loading session…</p>;
     if (w.traceRunId !== runId) return <p className="muted">Loading session…</p>;

@@ -11,7 +11,7 @@ const statusVariant = (status: Plan["status"]) =>
 
 export function PlanDetail({ plan }: { plan: Plan }) {
   return (
-    <section aria-labelledby="detail-heading" role="region">
+    <section aria-labelledby="detail-heading">
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="eyebrow">PLAN / REVISION {plan.revision}</p>

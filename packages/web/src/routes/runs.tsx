@@ -8,6 +8,7 @@ import { useWorkflow } from "@/workflow/workflow-context";
 export const Route = createFileRoute("/runs")({
   component: () => {
     const w = useWorkflow();
+    const { setSelected } = w;
     const navigate = useNavigate();
     const isDetail = useMatches().some((match) => match.routeId === "/runs/$runId");
     useAppHeader(
@@ -15,8 +16,8 @@ export const Route = createFileRoute("/runs")({
       "Inspect agent execution, tool calls, and resource usage in real time.",
     );
     useEffect(() => {
-      if (!isDetail) w.setSelected(undefined);
-    }, [isDetail, w.setSelected]);
+      if (!isDetail) setSelected(undefined);
+    }, [isDetail, setSelected]);
     if (isDetail) return <Outlet />;
     return (
       <List

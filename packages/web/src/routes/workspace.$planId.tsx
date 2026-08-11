@@ -12,9 +12,13 @@ function PlanRoute() {
   const back = () => void navigate({ to: "/workspace", replace: true });
   if (query.isPending)
     return (
-      <div role="status" aria-busy="true" aria-label="Loading plan">
+      <section aria-label="Loading plan">
+        {/* oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- Status is the appropriate live-region semantics for this announcement. */}
+        <p role="status" aria-live="polite" className="sr-only">
+          Loading plan
+        </p>
         <Skeleton className="h-96" />
-      </div>
+      </section>
     );
   if (query.isError)
     return (

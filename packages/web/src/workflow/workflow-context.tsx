@@ -72,8 +72,9 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         load: (before) =>
           before !== undefined ? void sessions.fetchNextPage() : void sessions.refetch(),
         loadTrace: (id, after) => {
-          if (id === selected)
-            after !== undefined ? void traceQuery.fetchNextPage() : void traceQuery.refetch();
+          if (id !== selected) return;
+          if (after !== undefined) void traceQuery.fetchNextPage();
+          else void traceQuery.refetch();
         },
         launch: async (request, agentName) => {
           const response = await launch.mutateAsync({ request, agentName });

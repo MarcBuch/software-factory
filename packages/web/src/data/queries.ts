@@ -18,7 +18,7 @@ import {
 import { useEffect, useRef } from "react";
 
 import { api, apiSchema } from "./api";
-import { mapPlansResponse, type Plan } from "./plans";
+import { mapPlansResponse } from "./plans";
 
 export type SessionsPage = { runs: Run[]; nextCursor?: number };
 export type TracePage = {

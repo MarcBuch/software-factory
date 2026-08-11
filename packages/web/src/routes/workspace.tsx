@@ -10,7 +10,7 @@ import {
 import { useAppHeader } from "@/components/app-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { Plan } from "@/data/plans";
 import { planQuery } from "@/data/queries";
@@ -221,11 +221,12 @@ function PlansTable({
   });
 
   return (
+    // oxlint-disable jsx-a11y/no-noninteractive-tabindex, jsx-a11y/prefer-tag-over-role -- Keyboard access is needed to scroll this wide table.
     <div
-      className="overflow-x-auto rounded-lg border bg-white dark:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       role="region"
-      aria-label="Scrollable plan revisions"
       tabIndex={0}
+      className="m-0 overflow-x-auto rounded-lg border bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:bg-background"
+      aria-label="Scrollable plan revisions"
     >
       <table className="w-full min-w-[900px] caption-bottom text-sm">
         <caption className="sr-only">Plan revisions</caption>
@@ -256,6 +257,7 @@ function PlansTable({
         </tbody>
       </table>
     </div>
+    // oxlint-enable jsx-a11y/no-noninteractive-tabindex, jsx-a11y/prefer-tag-over-role
   );
 }
 
