@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile, type ExecFileException } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -305,12 +305,26 @@ describe("standalone plans", () => {
     await run(d, "mission", "init", "--track");
     expect(await Bun.file(g).text()).not.toContain(".factory/");
   });
-  test("skills install refuses overwrite", async () => {
+  test("skills install replaces bundled skills without touching unrelated skills", async () => {
     const d = await repo();
+    const skills = join(d, ".agents", "skills"),
+      source = join(import.meta.dir, "..", "..", "..", ".agents", "skills");
     expect((await run(d, "mission", "init", "--skills", "--json")).exitCode).toBe(0);
+    await writeFile(join(skills, "plan-mission", "SKILL.md"), "stale");
+    await writeFile(join(skills, "plan-mission", "extra.md"), "stale");
+    await writeFile(join(skills, "run-mission", "SKILL.md"), "stale");
+    await mkdir(join(skills, "unrelated"), { recursive: true });
+    await writeFile(join(skills, "unrelated", "keep.md"), "keep");
     const again = await run(d, "mission", "init", "--skills", "--json");
-    expect(again.exitCode).not.toBe(0);
-    expect(JSON.parse(again.stderr).error).toContain("already exists");
+    expect(again.exitCode).toBe(0);
+    expect(await readFile(join(skills, "plan-mission", "SKILL.md"), "utf8")).toBe(
+      await readFile(join(source, "plan-mission", "SKILL.md"), "utf8"),
+    );
+    expect(await Bun.file(join(skills, "plan-mission", "extra.md")).exists()).toBe(false);
+    expect(await readFile(join(skills, "run-mission", "SKILL.md"), "utf8")).toBe(
+      await readFile(join(source, "run-mission", "SKILL.md"), "utf8"),
+    );
+    expect(await readFile(join(skills, "unrelated", "keep.md"), "utf8")).toBe("keep");
   });
   test("stale lock is claimed safely and corrupt storage is reported", async () => {
     const d = await repo(),

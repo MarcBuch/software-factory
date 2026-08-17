@@ -155,14 +155,18 @@ const missionSkills = ["plan-mission", "run-mission"];
 const skillSource = join(import.meta.dir, "..", "..", "..", ".agents", "skills");
 async function installMissionSkills(root: string) {
   const destination = join(root, ".agents", "skills");
-  for (const name of missionSkills)
-    if (existsSync(join(destination, name)))
-      throw Error(`Mission skill already exists: .agents/skills/${name}`);
   await mkdir(destination, { recursive: true });
-  for (const name of missionSkills)
-    await cp(join(skillSource, name), join(destination, name), {
-      recursive: true,
-    });
+  for (const name of missionSkills) {
+    const target = join(destination, name),
+      temporary = join(destination, `.${name}.tmp-${process.pid}-${Date.now()}-${Math.random()}`);
+    try {
+      await cp(join(skillSource, name), temporary, { recursive: true });
+      await rm(target, { recursive: true, force: true });
+      await rename(temporary, target);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }
 }
 function validateAll(missions: MissionType[]) {
   const ids = new Set<string>(),
