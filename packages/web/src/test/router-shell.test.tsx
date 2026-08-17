@@ -9,21 +9,15 @@ const mockPlans = [
   {
     id: "pln_one",
     missionTitle: "First plan",
-    verificationMode: "standard",
-    milestones: [{ key: "m1", title: "Build" }],
+    intent: "First intent",
+    changePlan: "Change plan",
+    verificationStrategy: "Verify it",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accept"],
     revision: 1,
     status: "approved",
-    sections: {
-      context: "Context",
-      intent: "First intent",
-      approach: "Approach",
-      executionDesign: "Design",
-      implementationDetails: "Details",
-      alternatives: [],
-      risks: [],
-      acceptance: ["Accept"],
-    },
-    steps: [],
+    verificationMode: "standard",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-02T00:00:00.000Z",
     approvedAt: "2026-01-02T00:00:00.000Z",
@@ -31,21 +25,15 @@ const mockPlans = [
   {
     id: "pln_two",
     missionTitle: "Second plan",
-    verificationMode: "fast",
-    milestones: [],
+    intent: "Second intent",
+    changePlan: "Change plan",
+    verificationStrategy: "Verify it",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accept"],
     revision: 1,
     status: "draft",
-    sections: {
-      context: "Context",
-      intent: "Second intent",
-      approach: "Approach",
-      executionDesign: "Design",
-      implementationDetails: "Details",
-      alternatives: [],
-      risks: [],
-      acceptance: ["Accept"],
-    },
-    steps: [],
+    verificationMode: "fast",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-02T00:00:00.000Z",
   },
@@ -127,7 +115,9 @@ describe("router shell", () => {
     expect(await screen.findByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Workspace" })).toBeInTheDocument();
     expect(
-      screen.getByText("Durable plan revisions, milestones, and execution intent in one place."),
+      screen.getByText(
+        "Durable plan revisions, change intent, and verification strategy in one place.",
+      ),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /workspace/i })).toHaveAttribute("data-active", "true");
     expect(MockEventSource.instances).toHaveLength(1);
@@ -246,7 +236,7 @@ describe("router shell", () => {
     expect(
       await screen.findByRole("heading", { name: mockPlans[1].missionTitle }),
     ).toBeInTheDocument();
-    expect(screen.getByText(mockPlans[1].sections.intent)).toBeInTheDocument();
+    expect(screen.getByText(mockPlans[1].intent)).toBeInTheDocument();
   });
 
   test("announces a pending plan detail without an aria-busy ancestor", async () => {
@@ -335,11 +325,7 @@ describe("router shell", () => {
     const { router, fetchMock, queryClient } = setup("/workspace");
     fetchMock.mockImplementation((input: RequestInfo | URL) =>
       String(input).endsWith("/api/plans")
-        ? Promise.resolve(
-            jsonResponse([
-              { ...mockPlans[0], sections: { ...mockPlans[0].sections, risks: "invalid" } },
-            ]),
-          )
+        ? Promise.resolve(jsonResponse([{ ...mockPlans[0], risks: "invalid" }]))
         : Promise.resolve(jsonResponse({ runs: [run] })),
     );
     render(

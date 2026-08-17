@@ -10,8 +10,8 @@ only in a plan before materialization; they are not runtime identifiers.
 ## Plan-Backed And Manual Missions
 
 A materialized mission has `sourcePlan: { planId, revision }`. Read that exact
-plan revision and require it to remain `approved`; use its context, risks, and
-acceptance criteria as execution and validation context. The task lifecycle,
+plan revision and require it to remain `approved`; use its intent, change plan,
+optional artifacts, risks, and acceptance criteria as execution and validation context. The task lifecycle,
 task IDs, and dependency IDs in the materialized mission remain the runtime
 authority.
 

@@ -174,29 +174,13 @@ test("completion reports invalid planner result fields", () => {
 test("completion accepts a complete planner plan input", () => {
   const plan = {
     missionTitle: "Notifications",
+    intent: "Intent",
+    changePlan: "Approach",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accepted"],
+    verificationStrategy: "Run focused test",
     verificationMode: "fast" as const,
-    sections: {
-      context: "Context",
-      intent: "Intent",
-      approach: "Approach",
-      executionDesign: "Design",
-      implementationDetails: "Details",
-      alternatives: [],
-      risks: [],
-      acceptance: ["Accepted"],
-    },
-    milestones: [{ key: "m1", title: "Notifications" }],
-    steps: [
-      {
-        key: "m1t1",
-        milestoneKey: "m1",
-        title: "Implement notifications",
-        type: "implementation" as const,
-        risk: "low" as const,
-        verification: "Run focused test",
-        dependsOn: [],
-      },
-    ],
   };
   const event = {
     stream: "stdout" as const,

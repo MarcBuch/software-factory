@@ -127,28 +127,12 @@ test("workflow CLI invokes the planner roster entry", async () => {
   const plan = {
     missionTitle: "Notifications",
     verificationMode: "fast",
-    sections: {
-      context: "Context",
-      intent: "Intent",
-      approach: "Approach",
-      executionDesign: "Design",
-      implementationDetails: "Details",
-      alternatives: [],
-      risks: [],
-      acceptance: ["Accepted"],
-    },
-    milestones: [{ key: "m1", title: "Notifications" }],
-    steps: [
-      {
-        key: "m1t1",
-        milestoneKey: "m1",
-        title: "Implement notifications",
-        type: "implementation",
-        risk: "low",
-        verification: "Run focused test",
-        dependsOn: [],
-      },
-    ],
+    intent: "Intent",
+    changePlan: "Approach",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accepted"],
+    verificationStrategy: "Run focused test",
   };
   const plannerResult = JSON.stringify({
     status: "success",
@@ -185,7 +169,7 @@ test("workflow CLI invokes the planner roster entry", async () => {
 test("planner refuses to persist a draft without codebase exploration", async () => {
   const p = await repo(
     await fakeScript(
-      `const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Missing exploration",verificationMode:"fast",sections:{context:"Context",intent:"Intent",approach:"Approach",executionDesign:"Design",implementationDetails:"Details",alternatives:[],risks:[],acceptance:["Accepted"]},milestones:[{key:"m1",title:"Plan"}],steps:[{key:"m1t1",milestoneKey:"m1",title:"Implement",type:"implementation",risk:"low",verification:"Check",dependsOn:[]}]}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Missing exploration",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   const result = await run(
@@ -204,7 +188,7 @@ test("planner refuses to persist a draft without codebase exploration", async ()
 test("planner refuses a failed codebase exploration", async () => {
   const p = await repo(
     await fakeScript(
-      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"error",input:{subagent_type:"codebase-explorer"},output:"exploration failed"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",sections:{context:"Context",intent:"Intent",approach:"Approach",executionDesign:"Design",implementationDetails:"Details",alternatives:[],risks:[],acceptance:["Accepted"]},milestones:[{key:"m1",title:"Plan"}],steps:[{key:"m1t1",milestoneKey:"m1",title:"Implement",type:"implementation",risk:"low",verification:"Check",dependsOn:[]}]}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"error",input:{subagent_type:"codebase-explorer"},output:"exploration failed"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   const result = await run(

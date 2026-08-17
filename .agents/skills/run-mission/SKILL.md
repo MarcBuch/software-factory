@@ -14,8 +14,8 @@ it for every operation. Factory is the sole runtime authority:
 
 Plan-backed missions have `sourcePlan: { planId, revision }`. For these,
 `run-mission` also reads the exact approved plan revision from
-`.factory/plans.jsonl` to obtain rationale, risks, acceptance criteria, and
-execution design. Manual missions without `sourcePlan` are supported normally;
+`.factory/plans.jsonl` to obtain intent, the overall change plan, optional
+external plan artifacts, risks, and acceptance criteria. Manual missions without `sourcePlan` are supported normally;
 use their embedded task risk and verification fields and do not warn merely
 because no plan exists. Reject a mission only when it has a broken source-plan
 reference or that referenced revision is not approved.
@@ -23,7 +23,7 @@ reference or that referenced revision is not approved.
 ## Protocol
 
 1. Read the selected mission with `factory mission show <mis_...> --json`.
-2. If it has `sourcePlan`, read `factory plan show <pln_...> --revision <n> --json`, confirm it is approved, and use its context and acceptance criteria during execution and validation.
+2. If it has `sourcePlan`, read `factory plan show <pln_...> --revision <n> --json`, confirm it is approved, and use its intent, change plan, optional artifacts, and acceptance criteria during execution and validation.
 3. Confirm the mission verification mode and the clean-worktree/diff baseline.
 4. Only the orchestrator changes lifecycle state with `factory mission update`
    or `factory mission close`; workers and validators do neither.

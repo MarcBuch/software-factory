@@ -5,6 +5,7 @@ import { cp, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/pr
 import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { MissionSchema, TaskSchema, type Mission } from "@software-factory/contracts";
 import { Command } from "commander";
 import { z } from "zod";
 
@@ -19,6 +20,7 @@ import {
   savePlansUnlocked,
   validatePlansAgainstMissions,
   resolveDependencies,
+  validatePlanArtifacts,
   type Plan,
   type MissionReference,
 } from "./plans";
@@ -30,9 +32,9 @@ import { openWorkflowStorage } from "./workflow-storage";
 import type { RunRecord } from "./workflow-storage";
 
 const exec = promisify(execFile);
-const iso = z.string().datetime({ offset: true });
 const text = z.string().trim().min(1);
-const Task = z
+const Task = TaskSchema;
+/* const Task = z
   .object({
     id: z.string().regex(/^tsk_[A-Za-z0-9]+$/),
     title: text,
@@ -91,9 +93,10 @@ const Mission = z
   .superRefine((v, c) => {
     if (v.updatedAt < v.createdAt)
       c.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
-  });
+  }); */
+const Mission = MissionSchema;
 const Metadata = z.object({ type: z.literal("metadata"), schemaVersion: z.literal(1) }).strict();
-type MissionType = z.infer<typeof Mission>;
+type MissionType = Mission;
 const now = () => new Date().toISOString();
 const makeId = (p: string) => `${p}_${crypto.randomUUID().replaceAll("-", "")}`;
 function clean(value: string) {
@@ -212,12 +215,27 @@ async function load(file: string) {
   Metadata.parse(JSON.parse(lines[0]));
   return validateAll(
     lines.slice(1).map((x) => {
-      const m = JSON.parse(x);
-      for (const ms of m.milestones ?? [])
-        for (const task of ms.tasks ?? []) if (task.status === undefined) task.status = "open";
+      const m = normalizeLegacyMission(JSON.parse(x));
       return Mission.parse(m);
     }),
   );
+}
+function normalizeLegacyMission(value: unknown) {
+  if (!value || typeof value !== "object") return value;
+  const mission = value as Record<string, any>;
+  return {
+    verificationStrategy: mission.verificationStrategy ?? "Verify mission tasks",
+    risks: mission.risks ?? [],
+    ...mission,
+    milestones: (mission.milestones ?? []).map((milestone: any) => ({
+      ...milestone,
+      tasks: (milestone.tasks ?? []).map((task: any) => ({
+        status: task.status ?? "open",
+        ...task,
+        dependsOn: task.dependsOn ?? [],
+      })),
+    })),
+  };
 }
 
 const withLock = withFactoryLock;
@@ -534,6 +552,8 @@ mc.action(async (opts, cmd) =>
         id: makeId("mis"),
         title: clean(opts.title),
         verificationMode: opts.verificationMode,
+        verificationStrategy: "Verify mission tasks",
+        risks: [],
         createdAt: t,
         updatedAt: t,
         milestones: [],
@@ -774,14 +794,17 @@ function validateInputPlan(value: Record<string, unknown>) {
 }
 const plan = program.command("plan");
 const materialize = jsonOption(plan.command("materialize"))
+  .description("Create a mission from an approved plan and explicit mission input")
   .argument("<plan-id>")
+  .requiredOption("--input <mission-input.json>", "Mission milestones and tasks JSON")
   .option("--revision <revision>");
 materialize.action(async (id, opts, cmd) =>
   withLock(async () => {
     const { p } = await planContext(),
       plans = await loadPlans(join(p.dir, "plans.jsonl"), []),
       planRecord = selectedRevision(plans, id, opts.revision);
-    if (planRecord.status !== "approved") throw Error("Only an approved plan may be materialized");
+    if (planRecord.status !== "approved")
+      throw Error("Only an approved plan may be used to create a mission");
     const all = await load(p.file);
     if (
       all.some(
@@ -791,53 +814,72 @@ materialize.action(async (id, opts, cmd) =>
           m.sourcePlan.revision === planRecord.revision,
       )
     )
-      throw Error("Plan revision is already materialized");
-    const t = now(),
-      milestones = new Map<string, any>(),
-      taskIds = new Map<string, string>();
-    for (const step of planRecord.steps) {
-      let ms = milestones.get(step.milestoneKey);
-      if (!ms) {
-        const def = planRecord.milestones.find((m: any) => m.key === step.milestoneKey);
-        if (!def) throw Error(`Unknown milestone key: ${step.milestoneKey}`);
-        ms = {
-          id: makeId("mil"),
-          title: def.title,
-          createdAt: t,
-          updatedAt: t,
-          tasks: [],
-        };
-        milestones.set(step.milestoneKey, ms);
+      throw Error("Plan revision is already linked to a mission");
+    const input = await inputJson(opts.input);
+    const inputSchema = z
+      .object({
+        title: text.optional(),
+        milestones: z
+          .array(
+            z
+              .object({
+                key: text,
+                title: text,
+                tasks: z.array(
+                  z
+                    .object({
+                      key: text,
+                      title: text,
+                      type: z.enum(["implementation", "verification"]),
+                      risk: z.enum(["low", "medium", "high"]),
+                      verification: text,
+                      dependsOn: z.array(text).default([]),
+                    })
+                    .strict(),
+                ),
+              })
+              .strict(),
+          )
+          .min(1),
+      })
+      .strict();
+    const parsed = inputSchema.parse(input),
+      t = now();
+    const taskIds = new Map<string, string>();
+    for (const ms of parsed.milestones)
+      for (const task of ms.tasks) {
+        if (taskIds.has(task.key)) throw Error(`Duplicate task key: ${task.key}`);
+        taskIds.set(task.key, makeId("tsk"));
       }
-      const tid = makeId("tsk");
-      taskIds.set(step.key, tid);
-      ms.tasks.push(
+    const milestones = parsed.milestones.map((ms) => ({
+      id: makeId("mil"),
+      title: ms.title,
+      createdAt: t,
+      updatedAt: t,
+      tasks: ms.tasks.map((task) =>
         Task.parse({
-          id: tid,
-          title: step.title,
-          type: step.type,
-          risk: step.risk,
-          verification: step.verification,
+          id: taskIds.get(task.key),
+          title: task.title,
+          type: task.type,
+          risk: task.risk,
+          verification: task.verification,
           status: "open",
-          planStepKey: step.key,
+          planStepKey: task.key,
+          dependsOn: resolveDependencies(task.dependsOn, taskIds),
           createdAt: t,
           updatedAt: t,
         }),
-      );
-    }
-    for (const step of planRecord.steps) {
-      const task = [...milestones.values()]
-        .flatMap((x: any) => x.tasks)
-        .find((x: any) => x.planStepKey === step.key);
-      if (task) task.dependsOn = resolveDependencies(step.dependsOn, taskIds);
-    }
+      ),
+    }));
     const mission = Mission.parse({
       id: makeId("mis"),
-      title: planRecord.missionTitle,
+      title: parsed.title ?? planRecord.missionTitle,
       verificationMode: planRecord.verificationMode,
+      verificationStrategy: planRecord.verificationStrategy,
+      risks: planRecord.risks,
       createdAt: t,
       updatedAt: t,
-      milestones: [...milestones.values()],
+      milestones,
       sourcePlan: { planId: id, revision: planRecord.revision },
     });
     all.push(mission);
@@ -849,7 +891,7 @@ const pc = jsonOption(
   plan
     .command("create")
     .description(
-      "Create a plan from JSON. Top level: missionTitle, verificationMode, sections, milestones, steps. Example: " +
+      "Create a plan from JSON. Top level: missionTitle, intent, changePlan, risks, alternatives, acceptanceCriteria, verificationStrategy, verificationMode, and optional externalArtifacts. Example: " +
         JSON.stringify(PLAN_INPUT_EXAMPLE),
     ),
 )
@@ -870,6 +912,7 @@ pc.action(async (opts, cmd) => {
   const record = await createDraftPlan(
     parsePlanInput(opts.inputJson ? inputJsonString(opts.inputJson) : await inputJson(opts.input)),
     join(p.dir, "plans.jsonl"),
+    p.root,
   );
   output(record, isJson(cmd));
 });
@@ -932,6 +975,7 @@ pr.action(async (id, opts, cmd) =>
           }
         : x,
     );
+    await validatePlanArtifacts(record, p.root);
     next.push(record);
     validatePlansAgainstMissions(next, []);
     await savePlansUnlocked(next, file);

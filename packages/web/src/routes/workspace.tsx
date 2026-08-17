@@ -27,7 +27,7 @@ function Workspace() {
   const isDetail = useMatches().some((match) => match.routeId === "/workspace/$planId");
   useAppHeader(
     "Workspace",
-    "Durable plan revisions, milestones, and execution intent in one place.",
+    "Durable plan revisions, change intent, and verification strategy in one place.",
   );
   const navigate = useNavigate();
   const plansQuery = planQuery();

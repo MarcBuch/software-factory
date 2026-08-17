@@ -9,41 +9,99 @@ export const PlanStatus = PlanStatusSchema;
 export const VerificationModeSchema = z.enum(["fast", "standard", "exhaustive"]);
 export const AlternativeSchema = z.object({ name: text, rejectedBecause: text }).strict();
 export const RiskSchema = z.object({ description: text, mitigation: text }).strict();
-export const RichSectionSchema = z
+export const ExternalPlanArtifactSchema = z
   .object({
-    context: text,
-    intent: text,
-    approach: text,
-    executionDesign: text,
-    implementationDetails: text,
-    alternatives: z.array(AlternativeSchema),
-    risks: z.array(RiskSchema),
-    acceptance: z.array(text),
+    path: z
+      .string()
+      .refine(
+        (path) =>
+          !path.includes("\\") &&
+          !path.startsWith("/") &&
+          !path.startsWith("./") &&
+          !path.split("/").some((part) => part === ".." || part === "") &&
+          /\.(?:html|md|mdx)$/.test(path),
+        "Artifact must be a repository-relative .html, .md, or .mdx path",
+      ),
+    label: text.optional(),
   })
   .strict();
-export const PlanStepSchema = z
+
+export const TaskStatusSchema = z.enum(["open", "in_progress", "closed"]);
+export const TaskSchema = z
   .object({
-    key: text,
-    milestoneKey: text,
+    id: z.string().regex(/^tsk_[A-Za-z0-9]+$/),
     title: text,
     type: z.enum(["implementation", "verification"]),
     risk: z.enum(["low", "medium", "high"]),
     verification: text,
-    executionNotes: text.optional(),
-    inputs: z.array(text).optional(),
-    invariants: z.array(text).optional(),
-    outcomes: z.array(text).optional(),
-    dependsOn: z.array(text),
+    status: TaskStatusSchema,
+    closureReason: text.optional(),
+    planStepKey: text.optional(),
+    dependsOn: z.array(z.string().regex(/^tsk_[A-Za-z0-9]+$/)).optional(),
+    createdAt: iso,
+    updatedAt: iso,
   })
-  .strict();
-export const MilestoneSchema = z.object({ key: text, title: text }).strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.updatedAt < value.createdAt)
+      context.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
+    if (value.status === "closed" && !value.closureReason)
+      context.addIssue({
+        code: "custom",
+        path: ["closureReason"],
+        message: "Closed tasks require a closure reason",
+      });
+    if (value.status !== "closed" && value.closureReason !== undefined)
+      context.addIssue({
+        code: "custom",
+        path: ["closureReason"],
+        message: "Only closed tasks may have a closure reason",
+      });
+  });
+export const MilestoneSchema = z
+  .object({
+    id: z.string().regex(/^mil_[A-Za-z0-9]+$/),
+    title: text,
+    createdAt: iso,
+    updatedAt: iso,
+    tasks: z.array(TaskSchema),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.updatedAt < value.createdAt)
+      context.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
+  });
+export const MissionSchema = z
+  .object({
+    id: z.string().regex(/^mis_[A-Za-z0-9]+$/),
+    title: text,
+    verificationMode: VerificationModeSchema,
+    verificationStrategy: text,
+    risks: z.array(RiskSchema),
+    createdAt: iso,
+    updatedAt: iso,
+    milestones: z.array(MilestoneSchema),
+    sourcePlan: z
+      .object({ planId: z.string(), revision: z.number().int().positive() })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.updatedAt < value.createdAt)
+      context.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
+  });
 export const PlanInputSchema = z
   .object({
     missionTitle: text,
+    intent: text,
+    changePlan: text,
+    externalArtifacts: z.array(ExternalPlanArtifactSchema).optional(),
+    risks: z.array(RiskSchema),
+    alternatives: z.array(AlternativeSchema),
+    acceptanceCriteria: z.array(text),
+    verificationStrategy: text,
     verificationMode: VerificationModeSchema,
-    sections: RichSectionSchema,
-    milestones: z.array(MilestoneSchema),
-    steps: z.array(PlanStepSchema),
   })
   .strict();
 
@@ -75,12 +133,16 @@ export const PlanRevisionSchema = approval(
     .object({
       id: planId,
       missionTitle: text,
+      intent: text,
+      changePlan: text,
+      externalArtifacts: z.array(ExternalPlanArtifactSchema).optional(),
+      risks: z.array(RiskSchema),
+      alternatives: z.array(AlternativeSchema),
+      acceptanceCriteria: z.array(text),
+      verificationStrategy: text,
       verificationMode: VerificationModeSchema,
-      milestones: z.array(MilestoneSchema),
       revision: z.number().int().min(1),
       status: PlanStatusSchema,
-      sections: RichSectionSchema,
-      steps: z.array(PlanStepSchema),
       createdAt: iso,
       updatedAt: iso,
       approvedAt: iso.optional(),
@@ -93,6 +155,10 @@ export type PlanRevision = z.infer<typeof PlanRevisionSchema>;
 export type PlanInput = z.infer<typeof PlanInputSchema>;
 export type PlanStatus = z.infer<typeof PlanStatusSchema>;
 export type VerificationMode = z.infer<typeof VerificationModeSchema>;
+export type ExternalPlanArtifact = z.infer<typeof ExternalPlanArtifactSchema>;
+export type Task = z.infer<typeof TaskSchema>;
+export type Milestone = z.infer<typeof MilestoneSchema>;
+export type Mission = z.infer<typeof MissionSchema>;
 
 export const RunFailureSchema = z
   .object({

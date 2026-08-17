@@ -1,15 +1,13 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
   PlanInputSchema,
   PlanSchema,
   PlanStatus,
-  PlanStepSchema,
-  RichSectionSchema,
   AlternativeSchema,
   RiskSchema,
   type Plan,
@@ -20,47 +18,43 @@ import { z } from "zod";
 import { withFactoryLock } from "./storage";
 const exec = promisify(execFile);
 
-export {
-  AlternativeSchema,
-  PlanInputSchema,
-  PlanSchema,
-  PlanStatus,
-  PlanStepSchema,
-  RichSectionSchema,
-  RiskSchema,
-};
+export { AlternativeSchema, PlanInputSchema, PlanSchema, PlanStatus, RiskSchema };
 export type { Plan, PlanRevision, PlanInput } from "@software-factory/contracts";
 
 export const PLAN_INPUT_EXAMPLE: PlanInput = {
   missionTitle: "Ship the feature",
+  intent: "Intent",
+  changePlan: "Change plan",
+  risks: [],
+  alternatives: [],
+  acceptanceCriteria: ["Verified"],
+  verificationStrategy: "Run tests",
   verificationMode: "standard",
-  sections: {
-    context: "Context",
-    intent: "Intent",
-    approach: "Approach",
-    executionDesign: "Design",
-    implementationDetails: "Details",
-    alternatives: [],
-    risks: [],
-    acceptance: ["Verified"],
-  },
-  milestones: [{ key: "build", title: "Build" }],
-  steps: [
-    {
-      key: "implement",
-      milestoneKey: "build",
-      title: "Implement",
-      type: "implementation",
-      risk: "medium",
-      verification: "Run tests",
-      dependsOn: [],
-    },
-  ],
 };
 
 export const PlanRevisionSchema = PlanSchema;
 
-export async function createDraftPlan(input: PlanInput, file: string): Promise<Plan> {
+/** Artifact paths are repository-relative, but their existence is a storage boundary concern. */
+export async function validatePlanArtifacts(plan: Plan, repositoryRoot: string) {
+  const root = await realpath(repositoryRoot);
+  for (const artifact of plan.externalArtifacts ?? []) {
+    try {
+      const candidate = await realpath(resolve(root, artifact.path));
+      const relativePath = relative(root, candidate);
+      if (relativePath === ".." || relativePath.startsWith("../"))
+        throw Error("outside repository");
+      if (!(await stat(candidate)).isFile()) throw Error("not a file");
+    } catch {
+      throw Error(`External plan artifact is missing or outside the repository: ${artifact.path}`);
+    }
+  }
+}
+
+export async function createDraftPlan(
+  input: PlanInput,
+  file: string,
+  repositoryRoot?: string,
+): Promise<Plan> {
   return withFactoryLock(async () => {
     const plans = await loadPlans(file, []);
     const now = new Date().toISOString();
@@ -72,6 +66,7 @@ export async function createDraftPlan(input: PlanInput, file: string): Promise<P
       createdAt: now,
       updatedAt: now,
     });
+    if (repositoryRoot) await validatePlanArtifacts(plan, repositoryRoot);
     validatePlansAgainstMissions([...plans, plan], []);
     await savePlansUnlocked([...plans, plan], file);
     return plan;
@@ -102,32 +97,6 @@ export function validatePlansAgainstMissions(plans: Plan[], _missions: MissionRe
   const groups = new Map<string, Plan[]>();
   for (const plan of plans) {
     PlanSchema.parse(plan);
-    const milestoneKeys = new Set(plan.milestones.map((m) => m.key));
-    if (milestoneKeys.size !== plan.milestones.length)
-      throw Error(`Duplicate milestone key in plan ${plan.id}`);
-    const taskKeys = new Set(plan.steps.map((s) => s.key));
-    if (taskKeys.size !== plan.steps.length) throw Error(`Duplicate task key in plan ${plan.id}`);
-    for (const step of plan.steps) {
-      if (!milestoneKeys.has(step.milestoneKey))
-        throw Error(`Unknown milestone key: ${step.milestoneKey}`);
-      if (new Set(step.dependsOn).size !== step.dependsOn.length)
-        throw Error(`Duplicate dependency in plan ${plan.id}`);
-      for (const dep of step.dependsOn)
-        if (!taskKeys.has(dep))
-          throw Error(`Dependency is not represented in plan ${plan.id}: ${dep}`);
-    }
-    const graph = new Map(plan.steps.map((s) => [s.key, s.dependsOn]));
-    const visiting = new Set<string>(),
-      visited = new Set<string>();
-    const visit = (key: string) => {
-      if (visiting.has(key)) throw Error(`Cyclic plan dependency involving task: ${key}`);
-      if (visited.has(key)) return;
-      visiting.add(key);
-      for (const dep of graph.get(key) ?? []) visit(dep);
-      visiting.delete(key);
-      visited.add(key);
-    };
-    for (const key of graph.keys()) visit(key);
     (groups.get(plan.id) ?? groups.set(plan.id, []).get(plan.id)!).push(plan);
   }
   for (const [id, group] of groups) {
@@ -181,7 +150,23 @@ export async function loadPlanRecords(file: string | undefined): Promise<Plan[]>
   const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
   if (!lines.length) throw Error("Invalid plan storage: missing metadata");
   PlansMetadataSchema.parse(JSON.parse(lines[0]));
-  return lines.slice(1).map((line) => PlanSchema.parse(JSON.parse(line)));
+  return lines.slice(1).map((line) => PlanSchema.parse(normalizeLegacyPlan(JSON.parse(line))));
+}
+
+function normalizeLegacyPlan(value: unknown) {
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, any>;
+  if (!record.sections) return record;
+  const { sections: _sections, milestones: _milestones, steps: _steps, ...current } = record;
+  return {
+    ...current,
+    intent: record.intent ?? _sections.intent,
+    changePlan: record.changePlan ?? _sections.approach,
+    risks: record.risks ?? _sections.risks,
+    alternatives: record.alternatives ?? _sections.alternatives,
+    acceptanceCriteria: record.acceptanceCriteria ?? _sections.acceptance,
+    verificationStrategy: record.verificationStrategy ?? "Verify the implementation",
+  };
 }
 
 export async function savePlansUnlocked(plans: Plan[], file: string) {

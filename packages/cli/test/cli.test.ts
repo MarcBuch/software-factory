@@ -60,32 +60,52 @@ async function planInput(d: string) {
     JSON.stringify({
       missionTitle: "Standalone",
       verificationMode: "exhaustive",
-      sections,
-      milestones: [{ key: "build", title: "Build" }],
-      steps: [
+      intent: "i",
+      changePlan: "a",
+      risks: [],
+      alternatives: [],
+      acceptanceCriteria: ["done"],
+      verificationStrategy: "e",
+    }),
+  );
+  return f;
+}
+async function missionInput(d: string) {
+  const f = join(d, "mission-input.json");
+  await writeFile(
+    f,
+    JSON.stringify({
+      title: "Standalone",
+      milestones: [
         {
-          key: "one",
-          milestoneKey: "build",
-          title: "One",
-          type: "implementation",
-          risk: "high",
-          verification: "verify one",
-          dependsOn: [],
-        },
-        {
-          key: "two",
-          milestoneKey: "build",
-          title: "Two",
-          type: "verification",
-          risk: "low",
-          verification: "verify two",
-          executionNotes: "notes",
-          dependsOn: ["one"],
+          key: "build",
+          title: "Build",
+          tasks: [
+            {
+              key: "one",
+              title: "One",
+              type: "implementation",
+              risk: "high",
+              verification: "verify one",
+              dependsOn: [],
+            },
+            {
+              key: "two",
+              title: "Two",
+              type: "verification",
+              risk: "low",
+              verification: "verify two",
+              dependsOn: ["one"],
+            },
+          ],
         },
       ],
     }),
   );
   return f;
+}
+async function materialize(d: string, id: string) {
+  return run(d, "plan", "materialize", id, "--input", await missionInput(d), "--json");
 }
 describe("standalone plans", () => {
   test("create writes plans only and materialize faithfully resolves IDs", async () => {
@@ -101,7 +121,7 @@ describe("standalone plans", () => {
     expect(p).not.toHaveProperty("missionId");
     expect((await run(d, "plan", "approve", p.id, "--json")).exitCode).toBe(0);
     const pb = await readFile(pf),
-      m = await run(d, "plan", "materialize", p.id, "--json");
+      m = await materialize(d, p.id);
     expect(m.exitCode).toBe(0);
     expect(await readFile(pf)).toEqual(pb);
     const mission = JSON.parse(m.stdout);
@@ -125,19 +145,12 @@ describe("standalone plans", () => {
     const inline = JSON.stringify({
       missionTitle: "Inline",
       verificationMode: "fast",
-      sections,
-      milestones: [{ key: "build", title: "Build" }],
-      steps: [
-        {
-          key: "one",
-          milestoneKey: "build",
-          title: "One",
-          type: "implementation",
-          risk: "low",
-          verification: "Check one",
-          dependsOn: [],
-        },
-      ],
+      intent: "i",
+      changePlan: "a",
+      risks: [],
+      alternatives: [],
+      acceptanceCriteria: ["done"],
+      verificationStrategy: "e",
     });
     const created = await run(d, "plan", "create", "--input-json", inline, "--json");
     expect(created.exitCode).toBe(0);
@@ -154,9 +167,15 @@ describe("standalone plans", () => {
       f = join(d, ".factory/missions.jsonl"),
       before = await readFile(f);
     const bad = JSON.parse(await readFile(input, "utf8"));
-    bad.steps[1].dependsOn = ["missing"];
-    await writeFile(input, JSON.stringify(bad));
-    expect((await run(d, "plan", "create", "--input", input, "--json")).exitCode).not.toBe(0);
+    const mission = await missionInput(d);
+    const badMission = JSON.parse(await readFile(mission, "utf8"));
+    badMission.milestones[0].tasks[1].dependsOn = ["missing"];
+    await writeFile(mission, JSON.stringify(badMission));
+    const p = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout);
+    await run(d, "plan", "approve", p.id, "--json");
+    expect(
+      (await run(d, "plan", "materialize", p.id, "--input", mission, "--json")).exitCode,
+    ).not.toBe(0);
     expect(await readFile(f)).toEqual(before);
   });
   test("duplicate materialization is rejected and concurrent calls yield one mission", async () => {
@@ -164,13 +183,10 @@ describe("standalone plans", () => {
       input = await planInput(d),
       p = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout);
     await run(d, "plan", "approve", p.id, "--json");
-    const rs = await Promise.all([
-      run(d, "plan", "materialize", p.id, "--json"),
-      run(d, "plan", "materialize", p.id, "--json"),
-    ]);
+    const rs = await Promise.all([materialize(d, p.id), materialize(d, p.id)]);
     expect(rs.filter((x) => x.exitCode === 0)).toHaveLength(1);
     expect(JSON.parse((await run(d, "mission", "list", "--json")).stdout)).toHaveLength(1);
-    expect((await run(d, "plan", "materialize", p.id, "--json")).exitCode).not.toBe(0);
+    expect((await materialize(d, p.id)).exitCode).not.toBe(0);
   });
   test("historical plans validate independently and legacy missions parse", async () => {
     const d = await repo(),
@@ -228,8 +244,8 @@ describe("standalone plans", () => {
       input = await planInput(d),
       p = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout);
     await run(d, "plan", "approve", p.id, "--json");
-    expect((await run(d, "plan", "materialize", p.id, "--json")).exitCode).toBe(0);
-    expect((await run(d, "plan", "materialize", p.id, "--json")).exitCode).not.toBe(0);
+    expect((await materialize(d, p.id)).exitCode).toBe(0);
+    expect((await materialize(d, p.id)).exitCode).not.toBe(0);
     expect(await Bun.file(join(d, ".factory/transaction.json")).exists()).toBe(false);
   });
   test("nested mission records preserve metadata", async () => {
@@ -435,35 +451,34 @@ describe("standalone plans", () => {
       store = join(d, ".factory/plans.jsonl"),
       before = await readFile(store),
       help = await run(d, "plan", "create", "--help");
-    for (const field of ["missionTitle", "verificationMode", "sections", "milestones", "steps"])
-      expect(help.stdout).toContain(field);
-    const schema = JSON.parse((await run(d, "plan", "create", "--schema", "--json")).stdout);
-    expect(schema.required).toEqual([
+    for (const field of [
       "missionTitle",
       "verificationMode",
-      "sections",
-      "milestones",
-      "steps",
-    ]);
-    expect(schema.properties.sections.required).toContain("context");
+      "intent",
+      "changePlan",
+      "acceptanceCriteria",
+    ])
+      expect(help.stdout).toContain(field);
+    const schema = JSON.parse((await run(d, "plan", "create", "--schema", "--json")).stdout);
+    expect(schema.required).toEqual(
+      expect.arrayContaining([
+        "missionTitle",
+        "verificationMode",
+        "intent",
+        "changePlan",
+        "risks",
+        "alternatives",
+        "acceptanceCriteria",
+        "verificationStrategy",
+      ]),
+    );
+    expect(schema.required).toContain("intent");
     expect((await run(d, "plan", "validate", "--input", f, "--json")).exitCode).toBe(0);
     expect(await readFile(store)).toEqual(before);
     await writeFile(f, JSON.stringify({ missionTitle: "Missing fields" }));
     const missing = await run(d, "plan", "validate", "--input", f, "--json");
     expect(missing.exitCode).not.toBe(0);
     expect(JSON.parse(missing.stderr).error).toContain("Valid example");
-    const duplicate = {
-      missionTitle: "Duplicate",
-      verificationMode: "standard",
-      sections,
-      milestones: [
-        { key: "build", title: "Build" },
-        { key: "build", title: "Again" },
-      ],
-      steps: [],
-    };
-    await writeFile(f, JSON.stringify(duplicate));
-    expect((await run(d, "plan", "validate", "--input", f, "--json")).exitCode).not.toBe(0);
     expect((await run(d, "plan", "validate", "anything", "--input", f, "--json")).stderr).toContain(
       "mutually exclusive",
     );
@@ -472,12 +487,18 @@ describe("standalone plans", () => {
     const d = await repo(),
       f = await planInput(d),
       v = JSON.parse(await readFile(f, "utf8"));
-    v.steps[0].dependsOn = ["two"];
-    v.steps[1].dependsOn = ["one"];
-    await writeFile(f, JSON.stringify(v));
+    const mission = await missionInput(d);
+    const cycle = JSON.parse(await readFile(mission, "utf8"));
+    cycle.milestones[0].tasks[0].dependsOn = ["two"];
+    cycle.milestones[0].tasks[1].dependsOn = ["one"];
+    await writeFile(mission, JSON.stringify(cycle));
     const mf = join(d, ".factory/missions.jsonl"),
       b = await readFile(mf);
-    expect((await run(d, "plan", "create", "--input", f, "--json")).exitCode).not.toBe(0);
+    const p = JSON.parse((await run(d, "plan", "create", "--input", f, "--json")).stdout);
+    await run(d, "plan", "approve", p.id, "--json");
+    expect(
+      (await run(d, "plan", "materialize", p.id, "--input", mission, "--json")).exitCode,
+    ).not.toBe(0);
     expect(await readFile(mf)).toEqual(b);
   });
   test("outside worktree is rejected", async () => {
@@ -702,7 +723,7 @@ describe("standalone plans", () => {
       p = JSON.parse((await run(d, "plan", "create", "--input", f, "--json")).stdout),
       mf = join(d, ".factory/missions.jsonl"),
       before = await readFile(mf),
-      r = await run(d, "plan", "materialize", p.id, "--json");
+      r = await materialize(d, p.id);
     expect(r.exitCode).not.toBe(0);
     expect(await readFile(mf)).toEqual(before);
   });
@@ -711,7 +732,7 @@ describe("standalone plans", () => {
       f = await planInput(d),
       p = JSON.parse((await run(d, "plan", "create", "--input", f, "--json")).stdout);
     await run(d, "plan", "approve", p.id, "--json");
-    const m = JSON.parse((await run(d, "plan", "materialize", p.id, "--json")).stdout);
+    const m = JSON.parse((await materialize(d, p.id)).stdout);
     expect(m.milestones[0].tasks[1].planStepKey).toBe("two");
     expect(m.milestones[0].tasks[1].verification).toBe("verify two");
   });
@@ -720,7 +741,7 @@ describe("standalone plans", () => {
       f = await planInput(d),
       p = JSON.parse((await run(d, "plan", "create", "--input", f, "--json")).stdout);
     await run(d, "plan", "approve", p.id, "--json");
-    const one = JSON.parse((await run(d, "plan", "materialize", p.id, "--json")).stdout),
+    const one = JSON.parse((await materialize(d, p.id)).stdout),
       mf = join(d, ".factory/missions.jsonl"),
       raw = await readFile(mf, "utf8"),
       dup = {
@@ -745,24 +766,17 @@ describe("standalone plans", () => {
       "Dependency task not found: missing",
     );
   });
-  test("duplicate milestone keys are rejected", async () => {
-    const d = await repo(),
-      f = await planInput(d),
-      v = JSON.parse(await readFile(f, "utf8"));
-    v.milestones.push({ key: "build", title: "Again" });
-    await writeFile(f, JSON.stringify(v));
-    const r = await run(d, "plan", "create", "--input", f, "--json");
-    expect(r.exitCode).not.toBe(0);
-    expect(r.stderr).toContain("Duplicate milestone key");
-  });
   test("revision store invariants reject gaps and duplicate approvals", () => {
     const base: any = {
       id: "pln_inv",
       missionTitle: "M",
       verificationMode: "standard",
-      milestones: [],
-      sections,
-      steps: [],
+      intent: "i",
+      changePlan: "a",
+      risks: [],
+      alternatives: [],
+      acceptanceCriteria: ["done"],
+      verificationStrategy: "e",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     };
@@ -805,5 +819,45 @@ describe("standalone plans", () => {
       const r = await run(d, ...args);
       expect(r.exitCode).toBe(0);
     }
+  });
+  test("artifact paths are optional and constrained to repository documents", async () => {
+    const d = await repo();
+    const valid = await planInput(d);
+    const base = JSON.parse(await readFile(valid, "utf8"));
+    await writeFile(join(d, "guide.md"), "guide");
+    for (const artifact of [
+      undefined,
+      { path: "guide.md" },
+      { path: "guide.txt" },
+      { path: "../guide.md" },
+      { path: "/tmp/guide.md" },
+      { path: "missing.md" },
+    ]) {
+      const input = {
+        ...base,
+        ...(artifact === undefined ? {} : { externalArtifacts: [artifact] }),
+      };
+      await writeFile(valid, JSON.stringify(input));
+      const result = await run(d, "plan", "create", "--input", valid, "--json");
+      expect(result.exitCode === 0, JSON.stringify(artifact)).toBe(
+        artifact === undefined || artifact.path === "guide.md",
+      );
+    }
+  });
+  test("artifact symlink escapes are rejected when supported", async () => {
+    const d = await repo();
+    const input = JSON.parse(await readFile(await planInput(d), "utf8"));
+    try {
+      await Bun.write(join(tmpdir(), "factory-secret.md"), "secret");
+      await (
+        await import("node:fs/promises")
+      ).symlink(join(tmpdir(), "factory-secret.md"), join(d, "escape.md"));
+    } catch {
+      return;
+    }
+    input.externalArtifacts = [{ path: "escape.md" }];
+    const f = join(d, "artifact.json");
+    await writeFile(f, JSON.stringify(input));
+    expect((await run(d, "plan", "create", "--input", f, "--json")).exitCode).not.toBe(0);
   });
 });

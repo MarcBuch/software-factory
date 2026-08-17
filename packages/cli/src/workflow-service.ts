@@ -363,7 +363,7 @@ async function completeWorkflow(args: {
     if (agent.name === "planner" && outcome.kind === "success") {
       if (!delegatedExplorer(outcome)) throw Error("Planner must delegate to codebase-explorer");
       if (!result.plan) throw Error("Planner must return a complete plan input");
-      const plan = await createDraftPlan(result.plan, join(root, ".factory", "plans.jsonl"));
+      const plan = await createDraftPlan(result.plan, join(root, ".factory", "plans.jsonl"), root);
       if ((await factoryState(root)).missions.content !== initialFactoryState.missions.content)
         throw Error("Planner draft creation changed mission state");
       result = {

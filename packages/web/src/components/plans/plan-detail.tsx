@@ -34,19 +34,26 @@ export function PlanDetail({ plan }: { plan: Plan }) {
           </div>
           <div className="grid gap-8 lg:grid-cols-[1fr_1.15fr]">
             <div className="space-y-6">
-              <DetailBlock title="Intent" text={plan.sections.intent} />
-              <DetailBlock title="Approach" text={plan.sections.approach} />
-              <DetailBlock title="Execution design" text={plan.sections.executionDesign} />
-              <DetailBlock
-                title="Implementation details"
-                text={plan.sections.implementationDetails}
-              />
-              <DetailBlock title="Context" text={plan.sections.context} />
+              <DetailBlock title="Intent" text={plan.intent} />
+              <DetailBlock title="Overall change plan" text={plan.changePlan} />
+              <DetailBlock title="Verification strategy" text={plan.verificationStrategy} />
+              {plan.externalArtifacts?.length ? (
+                <List title="External plan artifacts">
+                  {plan.externalArtifacts.map((artifact) => (
+                    <div key={artifact.path} className="rounded-lg border p-3 text-sm">
+                      <p className="font-medium">{artifact.label ?? artifact.path}</p>
+                      <p className="mt-1 font-mono text-xs text-muted-foreground">
+                        {artifact.path}
+                      </p>
+                    </div>
+                  ))}
+                </List>
+              ) : null}
               <div>
                 <h3 className="mb-2 font-semibold">Alternatives considered</h3>
-                {plan.sections.alternatives.length ? (
+                {plan.alternatives.length ? (
                   <div className="space-y-3">
-                    {plan.sections.alternatives.map((item) => (
+                    {plan.alternatives.map((item) => (
                       <div key={item.name} className="rounded-lg border p-3 text-sm">
                         <p className="font-medium">{item.name}</p>
                         <p className="mt-1 text-muted-foreground">
@@ -61,51 +68,8 @@ export function PlanDetail({ plan }: { plan: Plan }) {
               </div>
             </div>
             <div className="space-y-6">
-              <div>
-                <h3 className="mb-3 font-semibold">Milestones & typed steps</h3>
-                <div className="space-y-3">
-                  {plan.milestones.map((milestone) => (
-                    <div key={milestone.key} className="rounded-lg border p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="font-medium">{milestone.title}</p>
-                        <Badge variant="outline">{milestone.key}</Badge>
-                      </div>
-                      <div className="mt-3 space-y-2">
-                        {plan.steps
-                          .filter((step) => step.milestoneKey === milestone.key)
-                          .map((step) => (
-                            <div key={step.key} className="border-l-2 pl-3 text-sm">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span>{step.title}</span>
-                                <Badge variant="secondary">{step.type}</Badge>
-                                <Badge variant="outline">{step.risk} risk</Badge>
-                              </div>
-                              <p className="mt-1 text-xs text-muted-foreground">
-                                {step.verification}
-                              </p>
-                              <div className="mt-3 space-y-2 text-xs text-muted-foreground">
-                                {step.executionNotes && (
-                                  <p>
-                                    <span className="font-medium text-foreground">
-                                      Execution notes:
-                                    </span>{" "}
-                                    {step.executionNotes}
-                                  </p>
-                                )}
-                                <StepList label="Inputs" items={step.inputs} />
-                                <StepList label="Invariants" items={step.invariants} />
-                                <StepList label="Outcomes" items={step.outcomes} />
-                                <StepList label="Depends on" items={step.dependsOn} />
-                              </div>
-                            </div>
-                          ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
               <List title="Risks">
-                {plan.sections.risks.map((risk) => (
+                {plan.risks.map((risk) => (
                   <div key={risk.description} className="rounded-lg border p-3 text-sm">
                     <p>{risk.description}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
@@ -116,7 +80,7 @@ export function PlanDetail({ plan }: { plan: Plan }) {
               </List>
               <List title="Acceptance">
                 <ul className="list-disc space-y-2 pl-5 text-sm">
-                  {plan.sections.acceptance.map((item) => (
+                  {plan.acceptanceCriteria.map((item) => (
                     <li key={item}>{item}</li>
                   ))}
                 </ul>
@@ -151,18 +115,6 @@ function List({ title, children }: { title: string; children: React.ReactNode })
       <div className="space-y-3">{children}</div>
     </div>
   );
-}
-function StepList({ label, items }: { label: string; items?: ReadonlyArray<string> }) {
-  return items?.length ? (
-    <div>
-      <span className="font-medium text-foreground">{label}:</span>
-      <ul className="mt-1 list-disc space-y-1 pl-4">
-        {items.map((item) => (
-          <li key={item}>{item}</li>
-        ))}
-      </ul>
-    </div>
-  ) : null;
 }
 function DetailBlock({ title, text }: { title: string; text: string }) {
   return (
