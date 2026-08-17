@@ -70,6 +70,11 @@ async function planInput(d: string) {
   );
   return f;
 }
+async function externalJson(value: unknown, name: string) {
+  const f = join(await mkdtemp(join(tmpdir(), "factory-input-")), name);
+  await writeFile(f, JSON.stringify(value));
+  return f;
+}
 async function missionInput(d: string) {
   const f = join(d, "mission-input.json");
   await writeFile(
@@ -160,6 +165,26 @@ describe("standalone plans", () => {
     const invalid = await run(d, "plan", "create", "--input-json", "not-json", "--json");
     expect(invalid.exitCode).not.toBe(0);
     expect(invalid.stderr).toContain("Invalid JSON input");
+  });
+  test("all plan input commands accept files outside the temporary repository", async () => {
+    const d = await repo(),
+      inside = JSON.parse(await readFile(await planInput(d), "utf8")),
+      external = await externalJson(inside, "plan.json");
+    const created = await run(d, "plan", "create", "--input", external, "--json");
+    expect(created.exitCode).toBe(0);
+    const plan = JSON.parse(created.stdout);
+    expect((await run(d, "plan", "validate", "--input", external, "--json")).exitCode).toBe(0);
+    expect((await run(d, "plan", "revise", plan.id, "--input", external, "--json")).exitCode).toBe(
+      0,
+    );
+    await run(d, "plan", "approve", plan.id, "--json");
+    const mission = await externalJson(
+      JSON.parse(await readFile(await missionInput(d), "utf8")),
+      "mission.json",
+    );
+    expect(
+      (await run(d, "plan", "materialize", plan.id, "--input", mission, "--json")).exitCode,
+    ).toBe(0);
   });
   test("rejects unresolved dependency without mission writes", async () => {
     const d = await repo(),
@@ -855,6 +880,45 @@ describe("standalone plans", () => {
       const result = await run(d, "plan", "create", "--input", valid, "--json");
       expect(result.exitCode === 0, JSON.stringify(artifact)).toBe(
         artifact === undefined || artifact.path === "guide.md",
+      );
+    }
+  });
+  test("external plan input still validates artifacts against the repository", async () => {
+    const d = await repo(),
+      base = JSON.parse(await readFile(await planInput(d), "utf8"));
+    await writeFile(join(d, "guide.md"), "guide");
+    const valid = await externalJson(
+      { ...base, externalArtifacts: [{ path: "guide.md" }] },
+      "valid.json",
+    );
+    expect((await run(d, "plan", "create", "--input", valid, "--json")).exitCode).toBe(0);
+    const invalid = await externalJson(
+      { ...base, externalArtifacts: [{ path: "../outside.md" }] },
+      "invalid.json",
+    );
+    const rejected = await run(d, "plan", "validate", "--input", invalid, "--json");
+    expect(rejected.exitCode).not.toBe(0);
+  });
+  test("plan guidance names structured fields and materialize rejects unsupported task types", async () => {
+    const d = await repo(),
+      base = JSON.parse(await readFile(await planInput(d), "utf8"));
+    base.risks = ["risk"];
+    base.alternatives = ["alternative"];
+    const invalidPlan = await externalJson(base, "bad-shapes.json");
+    const planError = await run(d, "plan", "validate", "--input", invalidPlan, "--json");
+    expect(planError.stderr).toContain("description");
+    expect(planError.stderr).toContain("mitigation");
+    expect(planError.stderr).toContain("rejectedBecause");
+    const p = JSON.parse(
+      (await run(d, "plan", "create", "--input", await planInput(d), "--json")).stdout,
+    );
+    await run(d, "plan", "approve", p.id, "--json");
+    const mission = JSON.parse(await readFile(await missionInput(d), "utf8"));
+    for (const type of ["test", "unknown"]) {
+      mission.milestones[0].tasks[0].type = type;
+      const f = await externalJson(mission, `${type}.json`);
+      expect((await run(d, "plan", "materialize", p.id, "--input", f, "--json")).exitCode).not.toBe(
+        0,
       );
     }
   });

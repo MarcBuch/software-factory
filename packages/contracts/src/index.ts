@@ -27,11 +27,13 @@ export const ExternalPlanArtifactSchema = z
   .strict();
 
 export const TaskStatusSchema = z.enum(["open", "in_progress", "closed"]);
+/** Implementation and verification are the only task types; test writing/running is verification. */
+export const TaskTypeSchema = z.enum(["implementation", "verification"]);
 export const TaskSchema = z
   .object({
     id: z.string().regex(/^tsk_[A-Za-z0-9]+$/),
     title: text,
-    type: z.enum(["implementation", "verification"]),
+    type: TaskTypeSchema,
     risk: z.enum(["low", "medium", "high"]),
     verification: text,
     status: TaskStatusSchema,

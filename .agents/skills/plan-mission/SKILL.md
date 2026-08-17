@@ -29,13 +29,13 @@ Verification mode: fast | standard | exhaustive
 
 ## Persisting an approved plan
 
-After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks`, `alternatives`, `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`.
+After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative.
 
 Run the following ordered workflow, using each command's `--json` result and parsing its `.id` value (an agent may parse the tool output directly; `jq` is optional):
 
 1. `factory plan create --input <plan.json> --json`; save `.id` as `planId`.
 2. `factory plan approve "$planId" --json`; confirm the returned revision is approved.
-3. Write mission input with `milestones[].{key,title,tasks[]}` and task fields `key,title,type,risk,verification,dependsOn`, then run `factory plan materialize "$planId" --input <mission-input.json> --json`; save `.id` as `missionId`.
+3. Write mission input with `milestones[].{key,title,tasks[]}` and task fields `key,title,type,risk,verification,dependsOn`, then run `factory plan materialize "$planId" --input <mission-input.json> --json`; save `.id` as `missionId`. Task `type` is exactly `implementation` or `verification`; writing or running tests is verification work, not a separate `test` type.
 
 Plan creation and approval write only `.factory/plans.jsonl`. Materialization requires the approved revision, resolves presentation keys to generated `mis_*`, `mil_*`, and `tsk_*` IDs, and writes one complete mission to `.factory/missions.jsonl`. The materialized mission stores `{ planId, revision }` as `sourcePlan`; it is the executable snapshot, while the plan remains the rationale and design record. If materialization fails after approval, retry `factory plan materialize "$planId" --input <mission-input.json>`; do not recreate the plan. Factory rejects duplicate materialization of the same plan revision.
 

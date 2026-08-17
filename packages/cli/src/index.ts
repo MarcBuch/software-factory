@@ -2,10 +2,15 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { MissionSchema, TaskSchema, type Mission } from "@software-factory/contracts";
+import {
+  MissionSchema,
+  TaskSchema,
+  TaskTypeSchema,
+  type Mission,
+} from "@software-factory/contracts";
 import { Command } from "commander";
 import { z } from "zod";
 
@@ -34,66 +39,6 @@ import type { RunRecord } from "./workflow-storage";
 const exec = promisify(execFile);
 const text = z.string().trim().min(1);
 const Task = TaskSchema;
-/* const Task = z
-  .object({
-    id: z.string().regex(/^tsk_[A-Za-z0-9]+$/),
-    title: text,
-    type: z.enum(["implementation", "verification"]),
-    risk: z.enum(["low", "medium", "high"]),
-    verification: text,
-    status: z.enum(["open", "in_progress", "closed"]),
-    closureReason: text.optional(),
-    planStepKey: text.optional(),
-    dependsOn: z.array(z.string().regex(/^tsk_[A-Za-z0-9]+$/)).optional(),
-    createdAt: iso,
-    updatedAt: iso,
-  })
-  .strict()
-  .superRefine((v, c) => {
-    if (v.updatedAt < v.createdAt)
-      c.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
-    if (v.status === "closed" && !v.closureReason)
-      c.addIssue({
-        code: "custom",
-        message: "Closed tasks require a nonempty closure reason",
-      });
-    if (v.status !== "closed" && v.closureReason !== undefined)
-      c.addIssue({
-        code: "custom",
-        message: "Only closed tasks may have a closure reason",
-      });
-  });
-const Milestone = z
-  .object({
-    id: z.string().regex(/^mil_[A-Za-z0-9]+$/),
-    title: text,
-    createdAt: iso,
-    updatedAt: iso,
-    tasks: z.array(Task),
-  })
-  .strict()
-  .superRefine((v, c) => {
-    if (v.updatedAt < v.createdAt)
-      c.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
-  });
-const Mission = z
-  .object({
-    id: z.string().regex(/^mis_[A-Za-z0-9]+$/),
-    title: text,
-    verificationMode: z.enum(["fast", "standard", "exhaustive"]),
-    createdAt: iso,
-    updatedAt: iso,
-    milestones: z.array(Milestone),
-    sourcePlan: z
-      .object({ planId: z.string(), revision: z.number().int().positive() })
-      .strict()
-      .optional(),
-  })
-  .strict()
-  .superRefine((v, c) => {
-    if (v.updatedAt < v.createdAt)
-      c.addIssue({ code: "custom", message: "updatedAt must be >= createdAt" });
-  }); */
 const Mission = MissionSchema;
 const Metadata = z.object({ type: z.literal("metadata"), schemaVersion: z.literal(1) }).strict();
 type MissionType = Mission;
@@ -718,18 +663,11 @@ async function planContext() {
 async function inputJson(file: string): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
-    const candidate = await realpath(resolve(process.cwd(), file)),
-      root = await realpath(await projectRoot()),
-      rel = relative(root, candidate);
-    if (rel.startsWith("..") || rel.startsWith(sep))
-      throw Error("Input file must be inside the project root");
+    await projectRoot();
+    const candidate = await realpath(resolve(process.cwd(), file));
     value = JSON.parse(await readFile(candidate, "utf8"));
   } catch (e) {
-    throw Error(
-      e instanceof Error && e.message.includes("inside the project root")
-        ? e.message
-        : `Invalid JSON input: ${e instanceof Error ? e.message : String(e)}`,
-    );
+    throw Error(`Invalid JSON input: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw Error("Plan input must be a JSON object");
@@ -767,7 +705,18 @@ function parsePlanInput(value: Record<string, unknown>) {
   } catch (e) {
     if (e instanceof z.ZodError)
       throw Error(
-        `${e.message}\n\nValid example: ${JSON.stringify(PLAN_INPUT_EXAMPLE)}\nRun \`factory plan create --schema\` for the full schema.`,
+        `${e.issues
+          .map((issue) => {
+            const path = issue.path.join(".");
+            if (path === "risks" || path.startsWith("risks."))
+              return `${path}: each risk must be an object with description and mitigation`;
+            if (path === "alternatives" || path.startsWith("alternatives."))
+              return `${path}: each alternative must be an object with name and rejectedBecause`;
+            return `${path || "input"}: ${issue.message}`;
+          })
+          .join(
+            "\n",
+          )}\n\nValid example: ${JSON.stringify(PLAN_INPUT_EXAMPLE)}\nRun \`factory plan create --schema\` for the full schema.`,
       );
     throw e;
   }
@@ -795,10 +744,11 @@ function validateInputPlan(value: Record<string, unknown>) {
   const t = now(),
     record = planInput(value, "pln_validation", 1, "draft", t, t);
   validatePlansAgainstMissions([record], []);
+  return record;
 }
 const plan = program.command("plan");
 const materialize = jsonOption(plan.command("materialize"))
-  .description("Create a mission from an approved plan and explicit mission input")
+  .description("Create a mission from an approved plan (tests belong in verification tasks)")
   .argument("<plan-id>")
   .requiredOption("--input <mission-input.json>", "Mission milestones and tasks JSON")
   .option("--revision <revision>");
@@ -834,7 +784,7 @@ materialize.action(async (id, opts, cmd) =>
                     .object({
                       key: text,
                       title: text,
-                      type: z.enum(["implementation", "verification"]),
+                      type: TaskTypeSchema,
                       risk: z.enum(["low", "medium", "high"]),
                       verification: text,
                       dependsOn: z.array(text).default([]),
@@ -895,11 +845,11 @@ const pc = jsonOption(
   plan
     .command("create")
     .description(
-      "Create a plan from JSON. Top level: missionTitle, intent, changePlan, risks, alternatives, acceptanceCriteria, verificationStrategy, verificationMode, and optional externalArtifacts. Example: " +
+      "Create a plan from JSON (input files may be outside the Git project). risks use {description, mitigation}; alternatives use {name, rejectedBecause}. Tests are verification tasks. Top level: missionTitle, intent, changePlan, risks, alternatives, acceptanceCriteria, verificationStrategy, verificationMode, and optional externalArtifacts. Example: " +
         JSON.stringify(PLAN_INPUT_EXAMPLE),
     ),
 )
-  .option("--input <json-file>", "JSON input file")
+  .option("--input <json-file>", "Readable JSON input file; may be outside the Git project")
   .option("--input-json <json>", "JSON input string")
   .option("--schema", "Print the accepted user input schema");
 pc.action(async (opts, cmd) => {
@@ -936,12 +886,14 @@ ps.action(async (id, opts, cmd) => {
 const pv = jsonOption(plan.command("validate"))
   .argument("[plan-id]")
   .option("--revision <revision>")
-  .option("--input <json-file>");
+  .option("--input <json-file>", "Readable plan JSON; may be outside the Git project");
 pv.action(async (id, opts, cmd) => {
   if (opts.input && (id || opts.revision))
     throw Error("--input is mutually exclusive with plan id or --revision");
   if (opts.input) {
-    validateInputPlan(await inputJson(opts.input));
+    const { p } = await planContext();
+    const value = await inputJson(opts.input);
+    await validatePlanArtifacts(validateInputPlan(value), p.root);
     output({ valid: true, count: 1 }, isJson(cmd));
     return;
   }
@@ -952,7 +904,7 @@ pv.action(async (id, opts, cmd) => {
 });
 const pr = jsonOption(plan.command("revise"))
   .argument("<plan-id>")
-  .requiredOption("--input <json-file>")
+  .requiredOption("--input <json-file>", "Readable plan JSON; may be outside the Git project")
   .option("--revision <revision>");
 pr.action(async (id, opts, cmd) =>
   withLock(async () => {
