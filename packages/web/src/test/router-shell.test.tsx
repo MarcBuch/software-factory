@@ -37,6 +37,37 @@ const mockPlans = [
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-02T00:00:00.000Z",
   },
+  {
+    id: "pln_three",
+    missionTitle: "Third plan",
+    intent: "Third intent",
+    changePlan: "Change plan",
+    verificationStrategy: "Verify it",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accept"],
+    revision: 1,
+    status: "draft",
+    verificationMode: "fast",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-04T00:00:00.000Z",
+  },
+  {
+    id: "pln_four",
+    missionTitle: "Fourth plan",
+    intent: "Fourth intent",
+    changePlan: "Change plan",
+    verificationStrategy: "Verify it",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accept"],
+    revision: 1,
+    status: "approved",
+    verificationMode: "standard",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-03T00:00:00.000Z",
+    approvedAt: "2026-01-03T00:00:00.000Z",
+  },
 ] as const;
 
 const run = {
@@ -189,6 +220,17 @@ describe("router shell", () => {
     expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
     const firstPlanRow = screen.getByRole("row", { name: /first plan/i });
     const secondPlanRow = screen.getByRole("row", { name: /second plan/i });
+    expect(
+      screen
+        .getAllByRole("row")
+        .slice(1)
+        .map((row) => within(row).getByRole("cell").textContent),
+    ).toEqual([
+      expect.stringContaining("Third plan"),
+      expect.stringContaining("Second plan"),
+      expect.stringContaining("Fourth plan"),
+      expect.stringContaining("First plan"),
+    ]);
     const updatedDate = new Intl.DateTimeFormat("en", {
       month: "short",
       day: "numeric",

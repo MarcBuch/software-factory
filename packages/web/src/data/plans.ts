@@ -11,11 +11,17 @@ export type PlanAlternative = Plan["alternatives"][number];
 
 export function mapPlansResponse(value: unknown): Plan[] {
   if (!Array.isArray(value)) throw new Error("Plans API returned an invalid response");
-  return value.map((record, index) => {
-    try {
-      return PlanSchema.parse(record);
-    } catch {
-      throw new Error(`Plans API returned an invalid plan[${index}]`);
-    }
-  });
+  return value
+    .map((record, index) => {
+      try {
+        return PlanSchema.parse(record);
+      } catch {
+        throw new Error(`Plans API returned an invalid plan[${index}]`);
+      }
+    })
+    .sort((a, b) => {
+      if (a.status === "draft" && b.status !== "draft") return -1;
+      if (a.status !== "draft" && b.status === "draft") return 1;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
 }
