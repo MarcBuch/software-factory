@@ -1,6 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { appendFile, chmod, mkdtemp, writeFile, rm, readdir, readFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  writeFile,
+  rm,
+  readdir,
+  readFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -139,6 +148,12 @@ test("workflow CLI invokes the planner roster entry", async () => {
     summary: "## Mission Plan: Notifications",
     artifacts: [],
     notes: [],
+    architecture: {
+      "Current Composition": "Current <layer>",
+      "Explicit Seams": "Seam & boundary",
+      "Data Model Changes": "Model change",
+      "Resulting Request Flow": "Flow <step>",
+    },
     plan,
   });
   const fake = await fakeScript(
@@ -163,6 +178,16 @@ test("workflow CLI invokes the planner roster entry", async () => {
     .map((line) => JSON.parse(line));
   expect(planRecords).toHaveLength(2);
   expect(planRecords[1]).toMatchObject({ missionTitle: "Notifications", status: "draft" });
+  const architecture = planRecords[1].externalArtifacts[0];
+  expect(architecture.path).toMatch(/^\.factory\/architecture\/run_[A-Za-z0-9]+\.html$/);
+  expect(architecture.label).toBe("Generated architecture reference");
+  const architectureHtml = await readFile(join(p.dir, architecture.path), "utf8");
+  expect(architectureHtml).toContain("<h2>Intent</h2>");
+  expect(architectureHtml).toContain("Current &lt;layer&gt;");
+  expect(architectureHtml).toContain("Seam &amp; boundary");
+  expect(architectureHtml).toContain("Model change");
+  expect(architectureHtml).toContain("Flow &lt;step&gt;");
+  expect(architectureHtml).toContain("<h2>Resulting Request Flow</h2>");
   expect(await Bun.file(join(p.dir, ".factory", "missions.jsonl")).exists()).toBe(false);
 });
 
@@ -201,6 +226,26 @@ test("planner refuses a failed codebase exploration", async () => {
     "Planner must delegate to codebase-explorer",
   );
   expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
+});
+
+test("planner cleans up its generated artifact when draft creation fails", async () => {
+  const p = await repo(
+    await fakeScript(
+      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failure",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    ),
+  );
+  await mkdir(join(p.dir, ".factory"), { recursive: true });
+  await writeFile(join(p.dir, ".factory", "plans.jsonl"), "not valid plan storage\n");
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
+  expect(result.code).toBe(1);
+  const architectureDirectory = join(p.dir, ".factory", "architecture");
+  expect(
+    (await readdir(architectureDirectory).catch(() => [])).filter((name) => name.endsWith(".html")),
+  ).toHaveLength(0);
 });
 
 test("workflow CLI deletes terminal run artifacts and rejects active runs", async () => {

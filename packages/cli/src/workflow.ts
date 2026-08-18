@@ -49,6 +49,15 @@ export const ArtifactRecordSchema = z
   .object({ path: RepositoryRelativePathSchema, kind: nonEmptyText, description: nonEmptyText })
   .strict();
 
+export const ArchitectureSectionsSchema = z
+  .object({
+    "Current Composition": nonEmptyText.optional(),
+    "Explicit Seams": nonEmptyText.optional(),
+    "Data Model Changes": nonEmptyText.optional(),
+    "Resulting Request Flow": nonEmptyText.optional(),
+  })
+  .strict();
+
 export const AgentResultSchema = z
   .object({
     status: z.enum(["success", "failure"]),
@@ -56,6 +65,7 @@ export const AgentResultSchema = z
     artifacts: z.array(ArtifactRecordSchema),
     notes: z.array(nonEmptyText),
     plan: PlanInputSchema.optional(),
+    architecture: ArchitectureSectionsSchema.optional(),
   })
   .strict();
 
@@ -77,6 +87,7 @@ export const BackendResultSchema = z
 export type WorkflowInput = z.infer<typeof WorkflowInputSchema>;
 export type AgentRosterEntry = z.infer<typeof AgentRosterEntrySchema>;
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
+export type ArchitectureSections = z.infer<typeof ArchitectureSectionsSchema>;
 export type AgentResult = z.infer<typeof AgentResultSchema>;
 export type BackendInvocation = z.infer<typeof BackendInvocationSchema>;
 export type BackendResult = z.infer<typeof BackendResultSchema>;

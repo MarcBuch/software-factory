@@ -29,7 +29,9 @@ Verification mode: fast | standard | exhaustive
 
 ## Persisting an approved plan
 
-After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative.
+After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative. Approval is the gate: do not generate architecture artifacts, create a plan, or materialize a mission before explicit approval. The integration renders the architecture artifact before `factory plan create` and attaches it through `externalArtifacts` at a predictable repository-relative `.factory/architecture/<run-id>.html` path.
+
+The generated architecture document always contains these sections, in order: **Intent**, **Current Composition**, **Target Layer Composition**, **Explicit Seams**, **Data Model Changes**, **Validation**, and **Resulting Request Flow**. Section semantics are respectively the purpose, known baseline, proposed layers, integration boundaries, persisted-shape impact, verification evidence, and end-to-end lifecycle. When exploration or planning does not provide a detail, state `Unavailable detail` rather than inventing facts. Dynamic content must be escaped; the document is self-contained, responsive, and printable.
 
 Run the following ordered workflow, using each command's `--json` result and parsing its `.id` value (an agent may parse the tool output directly; `jq` is optional):
 

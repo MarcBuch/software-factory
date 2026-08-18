@@ -1,8 +1,19 @@
 import { execFile } from "node:child_process";
-import { mkdir, open, readFile, rename, rm, writeFile, lstat, unlink } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+  lstat,
+  unlink,
+} from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { renderArchitectureHtml } from "./architecture-renderer";
 import { OpenCodeAdapter, type BackendAdapter, type BackendProcess } from "./backend";
 import { completeAgent } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
@@ -363,7 +374,42 @@ async function completeWorkflow(args: {
     if (agent.name === "planner" && outcome.kind === "success") {
       if (!delegatedExplorer(outcome)) throw Error("Planner must delegate to codebase-explorer");
       if (!result.plan) throw Error("Planner must return a complete plan input");
-      const plan = await createDraftPlan(result.plan, join(root, ".factory", "plans.jsonl"), root);
+      const artifactPath = join(".factory", "architecture", `${run.id}.html`);
+      const artifactFile = join(root, artifactPath);
+      const artifactDirectory = join(root, ".factory", "architecture");
+      await mkdir(artifactDirectory, { recursive: true });
+      try {
+        await lstat(artifactFile);
+        throw Error(`Generated architecture artifact already exists: ${artifactPath}`);
+      } catch (error: any) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      const temporary = `${artifactFile}.tmp.${crypto.randomUUID()}`;
+      let published = false;
+      try {
+        await writeFile(temporary, renderArchitectureHtml(result.plan, result.architecture), {
+          encoding: "utf8",
+          flag: "wx",
+        });
+        await link(temporary, artifactFile);
+        published = true;
+      } finally {
+        await rm(temporary, { force: true });
+      }
+      const planInput = {
+        ...result.plan,
+        externalArtifacts: [
+          ...(result.plan.externalArtifacts ?? []),
+          { path: artifactPath, label: "Generated architecture reference" },
+        ],
+      };
+      let plan;
+      try {
+        plan = await createDraftPlan(planInput, join(root, ".factory", "plans.jsonl"), root);
+      } catch (error) {
+        if (published) await rm(artifactFile, { force: true });
+        throw error;
+      }
       if ((await factoryState(root)).missions.content !== initialFactoryState.missions.content)
         throw Error("Planner draft creation changed mission state");
       result = {

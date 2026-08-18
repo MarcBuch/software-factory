@@ -19,6 +19,7 @@ const PLANNER_RESULT_INSTRUCTIONS = `Return only one result between the exact ma
 ${FACTORY_RESULT_START} and ${FACTORY_RESULT_END}. The content must be a
 JSON object matching this schema: {"status":"success"|"failure","summary":string,
 "artifacts":[{"path":string,"kind":string,"description":string}],"notes":[string],
+"architecture"?:{"Current Composition"?:string,"Explicit Seams"?:string,"Data Model Changes"?:string,"Resulting Request Flow"?:string},
 "plan":{"missionTitle":string,"intent":string,"changePlan":string,
 "externalArtifacts"?:[{"path":string,"label"?:string}],
 "risks":[{"description":string,"mitigation":string}],
