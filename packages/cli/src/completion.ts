@@ -87,7 +87,8 @@ export function parseFinalAssistantResult(events: readonly BackendEvent[]): Pars
   const text = events
     .map(assistantText)
     .filter((part): part is string => part !== undefined)
-    .join("");
+    .join("")
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
   const lines = text.split(/\r?\n/).map((line) => line.trim());
   const starts = lines.filter((line) => line === FINAL_JSON_START).length;
   const ends = lines.filter((line) => line === FINAL_JSON_END).length;
@@ -108,7 +109,19 @@ export function parseFinalAssistantResult(events: readonly BackendEvent[]): Pars
   try {
     value = JSON.parse(body);
   } catch {
-    return { ok: false, reason: "malformed JSON" };
+    let candidate = body;
+    let recovered = false;
+    while (candidate.endsWith("}")) {
+      candidate = candidate.slice(0, -1).trimEnd();
+      try {
+        value = JSON.parse(candidate);
+        recovered = true;
+        break;
+      } catch {
+        // Only tolerate surplus closing braces; all other malformed JSON remains invalid.
+      }
+    }
+    if (!recovered) return { ok: false, reason: "malformed JSON" };
   }
   const result = FactoryFinalResultSchema.safeParse(value);
   return result.success

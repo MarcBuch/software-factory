@@ -334,12 +334,16 @@ describe("standalone plans", () => {
     const d = await repo();
     const skills = join(d, ".agents", "skills"),
       source = join(import.meta.dir, "..", "..", "..", ".agents", "skills");
+    const agents = join(d, ".opencode", "agents"),
+      agentSource = join(import.meta.dir, "..", "..", "..", ".opencode", "agents");
     expect((await run(d, "mission", "init", "--skills", "--json")).exitCode).toBe(0);
     await writeFile(join(skills, "plan-mission", "SKILL.md"), "stale");
     await writeFile(join(skills, "plan-mission", "extra.md"), "stale");
     await writeFile(join(skills, "run-mission", "SKILL.md"), "stale");
     await mkdir(join(skills, "unrelated"), { recursive: true });
     await writeFile(join(skills, "unrelated", "keep.md"), "keep");
+    await writeFile(join(agents, "plan-mission.md"), "stale");
+    await writeFile(join(agents, "unrelated.md"), "keep");
     const again = await run(d, "mission", "init", "--skills", "--json");
     expect(again.exitCode).toBe(0);
     expect(await readFile(join(skills, "plan-mission", "SKILL.md"), "utf8")).toBe(
@@ -349,7 +353,14 @@ describe("standalone plans", () => {
     expect(await readFile(join(skills, "run-mission", "SKILL.md"), "utf8")).toBe(
       await readFile(join(source, "run-mission", "SKILL.md"), "utf8"),
     );
+    expect(await readFile(join(skills, "visualize-change", "SKILL.md"), "utf8")).toBe(
+      await readFile(join(source, "visualize-change", "SKILL.md"), "utf8"),
+    );
     expect(await readFile(join(skills, "unrelated", "keep.md"), "utf8")).toBe("keep");
+    expect(await readFile(join(agents, "plan-mission.md"), "utf8")).toBe(
+      await readFile(join(agentSource, "plan-mission.md"), "utf8"),
+    );
+    expect(await readFile(join(agents, "unrelated.md"), "utf8")).toBe("keep");
   });
   test("stale lock is claimed safely and corrupt storage is reported", async () => {
     const d = await repo(),

@@ -171,6 +171,47 @@ test("completion reports invalid planner result fields", () => {
   });
 });
 
+test("completion ignores OpenCode system reminders", () => {
+  const event = {
+    stream: "stdout" as const,
+    raw: JSON.stringify({
+      type: "text",
+      part: {
+        text: [
+          "---FACTORY_RESULT_JSON---",
+          "<system-reminder>",
+          "Your operational mode has changed from plan to build.",
+          "</system-reminder>",
+          JSON.stringify({ status: "success", summary: "ok", artifacts: [], notes: [] }),
+          "---END_FACTORY_RESULT_JSON---",
+        ].join("\n"),
+      },
+    }),
+  };
+  expect(parseFinalAssistantResult([event])).toEqual({
+    ok: true,
+    result: { status: "success", summary: "ok", artifacts: [], notes: [] },
+  });
+});
+
+test("completion recovers surplus trailing object braces", () => {
+  const event = {
+    stream: "stdout" as const,
+    raw: JSON.stringify({
+      role: "assistant",
+      content: [
+        "---FACTORY_RESULT_JSON---",
+        `${JSON.stringify({ status: "success", summary: "ok", artifacts: [], notes: [] })}}`,
+        "---END_FACTORY_RESULT_JSON---",
+      ].join("\n"),
+    }),
+  };
+  expect(parseFinalAssistantResult([event])).toEqual({
+    ok: true,
+    result: { status: "success", summary: "ok", artifacts: [], notes: [] },
+  });
+});
+
 test("completion accepts a complete planner plan input", () => {
   const plan = {
     missionTitle: "Notifications",

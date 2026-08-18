@@ -49,12 +49,77 @@ export const ArtifactRecordSchema = z
   .object({ path: RepositoryRelativePathSchema, kind: nonEmptyText, description: nonEmptyText })
   .strict();
 
+const tone = z.enum(["legacy", "new", "client", "test", "neutral"]);
+const titledDetail = z.object({ title: nonEmptyText, detail: nonEmptyText }).strict();
+const titledItems = z.object({ title: nonEmptyText, items: z.array(nonEmptyText) }).strict();
+
 export const ArchitectureSectionsSchema = z
   .object({
-    "Current Composition": nonEmptyText.optional(),
-    "Explicit Seams": nonEmptyText.optional(),
-    "Data Model Changes": nonEmptyText.optional(),
-    "Resulting Request Flow": nonEmptyText.optional(),
+    lede: nonEmptyText,
+    statusTags: z.array(z.object({ label: nonEmptyText, tone }).strict()),
+    currentComposition: z
+      .object({
+        summary: nonEmptyText,
+        groups: z.array(
+          z
+            .object({
+              title: nonEmptyText,
+              tone,
+              items: z.array(
+                z
+                  .object({
+                    title: nonEmptyText,
+                    detail: nonEmptyText,
+                    code: nonEmptyText.optional(),
+                  })
+                  .strict(),
+              ),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+    targetLayers: z.array(titledDetail.extend({ code: nonEmptyText.optional(), tone }).strict()),
+    seams: z.array(titledDetail),
+    dataModelChanges: z
+      .object({
+        summary: nonEmptyText,
+        requestLabel: nonEmptyText.optional(),
+        requestExample: nonEmptyText.optional(),
+        responseLabel: nonEmptyText.optional(),
+        responseExample: nonEmptyText.optional(),
+        stages: z.array(
+          z
+            .object({
+              stage: nonEmptyText,
+              responsibility: nonEmptyText,
+              preserves: nonEmptyText,
+            })
+            .strict(),
+        ),
+        compatibility: z
+          .object({
+            decision: nonEmptyText,
+            legacyTitle: nonEmptyText,
+            legacyItems: z.array(nonEmptyText),
+            targetTitle: nonEmptyText,
+            targetItems: z.array(nonEmptyText),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict(),
+    validation: z
+      .object({
+        groups: z.array(titledItems),
+        parityRows: z.array(
+          z
+            .object({ area: nonEmptyText, comparison: nonEmptyText, handling: nonEmptyText })
+            .strict(),
+        ),
+      })
+      .strict(),
+    resultingRequestFlow: nonEmptyText,
   })
   .strict();
 

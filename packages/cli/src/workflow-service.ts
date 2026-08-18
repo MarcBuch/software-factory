@@ -155,6 +155,30 @@ function delegatedExplorer(outcome: WorkflowOutcome) {
   return false;
 }
 
+function completedVisualization(outcome: WorkflowOutcome) {
+  for (const event of outcome.events) {
+    const normalized = event.normalized;
+    if (
+      normalized?.type !== "tool_call" ||
+      normalized.tool !== "skill" ||
+      normalized.phase !== "finish" ||
+      !normalized.input ||
+      typeof normalized.input !== "object" ||
+      (normalized.input as Record<string, unknown>).name !== "visualize-change" ||
+      !normalized.output ||
+      typeof normalized.output !== "object"
+    )
+      continue;
+    if (
+      ["completed", "success"].includes(
+        String((normalized.output as Record<string, unknown>).status ?? "").toLowerCase(),
+      )
+    )
+      return true;
+  }
+  return false;
+}
+
 type FactoryFile = Readonly<{ content?: string }>;
 type FactoryState = Readonly<{ plans: FactoryFile; missions: FactoryFile }>;
 async function factoryState(root: string): Promise<FactoryState> {
@@ -373,7 +397,11 @@ async function completeWorkflow(args: {
     }
     if (agent.name === "planner" && outcome.kind === "success") {
       if (!delegatedExplorer(outcome)) throw Error("Planner must delegate to codebase-explorer");
+      if (!completedVisualization(outcome))
+        throw Error("Planner must complete the visualize-change skill");
       if (!result.plan) throw Error("Planner must return a complete plan input");
+      if (!result.architecture)
+        throw Error("Planner must return complete visualize-change architecture data");
       const artifactPath = join(".factory", "architecture", `${run.id}.html`);
       const artifactFile = join(root, artifactPath);
       const artifactDirectory = join(root, ".factory", "architecture");

@@ -149,15 +149,22 @@ test("workflow CLI invokes the planner roster entry", async () => {
     artifacts: [],
     notes: [],
     architecture: {
-      "Current Composition": "Current <layer>",
-      "Explicit Seams": "Seam & boundary",
-      "Data Model Changes": "Model change",
-      "Resulting Request Flow": "Flow <step>",
+      lede: "Plan architecture",
+      statusTags: [],
+      currentComposition: {
+        summary: "Current <layer>",
+        groups: [],
+      },
+      targetLayers: [],
+      seams: [{ title: "Boundary", detail: "Seam & boundary" }],
+      dataModelChanges: { summary: "Model change", stages: [] },
+      validation: { groups: [], parityRows: [] },
+      resultingRequestFlow: "Flow <step>",
     },
     plan,
   });
   const fake = await fakeScript(
-    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"exploration findings"}}})); const content=["---FACTORY_RESULT_JSON---",${JSON.stringify(plannerResult)},"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    `await import("node:fs/promises").then(x=>x.writeFile(${JSON.stringify(log)},process.argv.slice(2).join(" "))); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"exploration findings"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"visualize",state:{status:"completed",input:{name:"visualize-change"},output:"skill contract"}}})); const content=["---FACTORY_RESULT_JSON---",${JSON.stringify(plannerResult)},"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
   );
   const p = await repo(fake);
   const result = await run(
@@ -187,6 +194,7 @@ test("workflow CLI invokes the planner roster entry", async () => {
   expect(architectureHtml).toContain("Seam &amp; boundary");
   expect(architectureHtml).toContain("Model change");
   expect(architectureHtml).toContain("Flow &lt;step&gt;");
+  expect(architectureHtml).toContain('<nav aria-label="Document sections">');
   expect(architectureHtml).toContain("<h2>Resulting Request Flow</h2>");
   expect(await Bun.file(join(p.dir, ".factory", "missions.jsonl")).exists()).toBe(false);
 });
@@ -228,10 +236,38 @@ test("planner refuses a failed codebase exploration", async () => {
   expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
 });
 
-test("planner cleans up its generated artifact when draft creation fails", async () => {
+test("planner refuses to persist a draft without visualize-change", async () => {
   const p = await repo(
     await fakeScript(
-      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failure",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); const architecture={lede:"Brief",statusTags:[],currentComposition:{summary:"Current",groups:[]},targetLayers:[],seams:[],dataModelChanges:{summary:"Model",stages:[]},validation:{groups:[],parityRows:[]},resultingRequestFlow:"Flow"}; const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],architecture,plan:{missionTitle:"Missing skill",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    ),
+  );
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout).run.failure.message).toBe(
+    "Planner must complete the visualize-change skill",
+  );
+  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
+});
+
+test("planner cleans up its generated artifact when draft creation fails", async () => {
+  const architecture = {
+    lede: "Brief",
+    statusTags: [],
+    currentComposition: { summary: "Current", groups: [] },
+    targetLayers: [],
+    seams: [],
+    dataModelChanges: { summary: "Model", stages: [] },
+    validation: { groups: [], parityRows: [] },
+    resultingRequestFlow: "Flow",
+  };
+  const p = await repo(
+    await fakeScript(
+      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"visualize",state:{status:"completed",input:{name:"visualize-change"},output:"contract"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],architecture:${JSON.stringify(architecture)},plan:{missionTitle:"Failure",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   await mkdir(join(p.dir, ".factory"), { recursive: true });

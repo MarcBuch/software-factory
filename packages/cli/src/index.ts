@@ -96,8 +96,9 @@ async function paths() {
     dir = join(root, ".factory");
   return { root, dir, file: join(dir, "missions.jsonl") };
 }
-const missionSkills = ["plan-mission", "run-mission"];
+const missionSkills = ["plan-mission", "run-mission", "visualize-change"];
 const skillSource = join(import.meta.dir, "..", "..", "..", ".agents", "skills");
+const agentSource = join(import.meta.dir, "..", "..", "..", ".opencode", "agents");
 async function installMissionSkills(root: string) {
   const destination = join(root, ".agents", "skills");
   await mkdir(destination, { recursive: true });
@@ -111,6 +112,16 @@ async function installMissionSkills(root: string) {
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
+  }
+  const agents = join(root, ".opencode", "agents");
+  await mkdir(agents, { recursive: true });
+  const target = join(agents, "plan-mission.md"),
+    temporary = join(agents, `.plan-mission.tmp-${process.pid}-${Date.now()}-${Math.random()}`);
+  try {
+    await cp(join(agentSource, "plan-mission.md"), temporary);
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
   }
 }
 function validateAll(missions: MissionType[]) {
@@ -459,7 +470,7 @@ const mission = program.command("mission");
 const init = mission
   .command("init")
   .option("--track", "Keep .factory records trackable")
-  .option("--skills", "Install the plan-mission and run-mission skills");
+  .option("--skills", "Install Factory mission skills and the plan-mission agent");
 jsonOption(init);
 init.action(async (opts, cmd) =>
   withLock(async () => {

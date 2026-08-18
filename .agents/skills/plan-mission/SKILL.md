@@ -29,9 +29,9 @@ Verification mode: fast | standard | exhaustive
 
 ## Persisting an approved plan
 
-After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative. Approval is the gate: do not generate architecture artifacts, create a plan, or materialize a mission before explicit approval. The integration renders the architecture artifact before `factory plan create` and attaches it through `externalArtifacts` at a predictable repository-relative `.factory/architecture/<run-id>.html` path.
+After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative. Approval is the gate: do not generate architecture artifacts, create a plan, or materialize a mission before explicit approval.
 
-The generated architecture document always contains these sections, in order: **Intent**, **Current Composition**, **Target Layer Composition**, **Explicit Seams**, **Data Model Changes**, **Validation**, and **Resulting Request Flow**. Section semantics are respectively the purpose, known baseline, proposed layers, integration boundaries, persisted-shape impact, verification evidence, and end-to-end lifecycle. When exploration or planning does not provide a detail, state `Unavailable detail` rather than inventing facts. Dynamic content must be escaped; the document is self-contained, responsive, and printable.
+Use the `visualize-change` skill for architecture visualization. It owns the exact document structure, evidence rules, structured data contract, and visual language. The skill returns data rather than writing files; Factory renders the self-contained HTML before `factory plan create` and attaches it through `externalArtifacts` at `.factory/architecture/<run-id>.html`.
 
 Run the following ordered workflow, using each command's `--json` result and parsing its `.id` value (an agent may parse the tool output directly; `jq` is optional):
 
@@ -45,7 +45,7 @@ Plan creation and approval write only `.factory/plans.jsonl`. Materialization re
 
 - Always classify risk and state verification mode.
 - Always present the plan and STOP for approval.
-- The Factory `planner` workflow is the exception: return the complete plan input in its structured result and let the workflow persist exactly one non-executable draft. It still must not approve or materialize that draft.
+- The Factory `planner` workflow is the exception: after exploration, load `visualize-change`, return its structured data under `architecture` with the complete plan input, and let the workflow render the HTML and persist exactly one non-executable draft. It still must not approve or materialize that draft.
 - Never call `mission_init` from this skill or begin implementation before approval.
 - Keep verification proportional; explain any dedicated verification task.
 - Do not create missions, milestones, or tasks directly in this workflow.

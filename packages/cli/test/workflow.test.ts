@@ -156,16 +156,20 @@ test("planner roster renders a delegated, workflow-persisted draft plan prompt",
   const planner = getRosterEntry("planner");
   expect(planner?.opencodeAgent).toBe("plan-mission");
   expect(planner?.model).toBe("github-copilot/gpt-5.6-terra");
+  expect(planner?.allowedTools).toContain("skill");
   const rendered = renderAgentPrompts("planner", "Plan notifications");
   expect(rendered.systemPrompt).toContain("codebase-explorer");
-  expect(rendered.systemPrompt).toContain("Factory plan input in the result plan field");
-  expect(rendered.systemPrompt).toContain("workflow validates and persists exactly one draft");
+  expect(rendered.systemPrompt).toContain("visualize-change");
+  expect(rendered.systemPrompt).toContain("Factory plan input in result.plan");
+  expect(rendered.systemPrompt).toContain("workflow renders the HTML");
   expect(rendered.systemPrompt).toContain("appends its pln_ ID");
   expect(rendered.systemPrompt).toContain('"plan":{"missionTitle":string');
-  expect(rendered.systemPrompt).toContain("For a successful result, plan is required");
+  expect(rendered.systemPrompt).toContain(
+    "For a successful result, plan and architecture are required",
+  );
   expect(rendered.systemPrompt).toContain("Do not approve, materialize, revise, archive");
   expect(rendered.systemPrompt).not.toContain("Do not include planning");
-  expect(rendered.userPrompt).toContain("let the workflow create the draft");
+  expect(rendered.userPrompt).toContain("load visualize-change");
 });
 
 test("OpenCode adapter adds the roster OpenCode agent", async () => {
