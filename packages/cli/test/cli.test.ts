@@ -4,10 +4,30 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PlanInputSchema } from "@software-factory/contracts";
+
 import { resolveDependencies, PlanSchema, validatePlansAgainstMissions } from "../src/plans";
 
 const cli = join(import.meta.dir, "..", "src", "index.ts"),
   repos = new Set<string>();
+
+test("changePlanSteps requires non-empty entries", () => {
+  const base = {
+    missionTitle: "Mission",
+    intent: "Intent",
+    changePlan: "Plan",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Done"],
+    verificationStrategy: "Check",
+    verificationMode: "fast" as const,
+  };
+  expect(() => PlanInputSchema.parse({ ...base, changePlanSteps: [] })).toThrow();
+  expect(() => PlanInputSchema.parse({ ...base, changePlanSteps: [" "] })).toThrow();
+  expect(
+    PlanInputSchema.parse({ ...base, changePlanSteps: ["First", "Second"] }).changePlanSteps,
+  ).toEqual(["First", "Second"]);
+});
 function run(
   cwd: string,
   ...args: string[]

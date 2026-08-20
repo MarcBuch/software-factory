@@ -25,6 +25,7 @@ export const PLAN_INPUT_EXAMPLE: PlanInput = {
   missionTitle: "Ship the feature",
   intent: "Intent",
   changePlan: "Change plan",
+  changePlanSteps: ["First step", "Second step"],
   risks: [{ description: "A dependency may change", mitigation: "Pin and verify it" }],
   alternatives: [{ name: "Alternative approach", rejectedBecause: "Less suitable here" }],
   acceptanceCriteria: ["Verified"],

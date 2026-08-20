@@ -235,3 +235,27 @@ test("completion accepts a complete planner plan input", () => {
     result: { status: "success", summary: "Plan", artifacts: [], notes: [], plan },
   });
 });
+
+test("completion preserves plans without changePlanSteps", () => {
+  const plan = {
+    missionTitle: "Notifications",
+    intent: "Intent",
+    changePlan: "Approach",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accepted"],
+    verificationStrategy: "Run focused test",
+    verificationMode: "fast" as const,
+  };
+  expect(
+    parseFinalAssistantResult([
+      {
+        stream: "stdout" as const,
+        raw: JSON.stringify({
+          role: "assistant",
+          content: `---FACTORY_RESULT_JSON---\n${JSON.stringify({ status: "success", summary: "Plan", artifacts: [], notes: [], plan })}\n---END_FACTORY_RESULT_JSON---`,
+        }),
+      },
+    ]).ok,
+  ).toBe(true);
+});

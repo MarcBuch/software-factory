@@ -99,7 +99,7 @@ For the Factory Planner workflow:
 
 1. The planning agent delegates repository exploration to `codebase-explorer`.
 2. It loads this skill and applies this contract to the exploration findings and proposed plan.
-3. It returns the complete plan under `plan` and this skill's structured data under `architecture` in the marked Factory JSON result.
+3. It returns the complete plan under `plan`, where `changePlan` remains required and optional non-empty `changePlanSteps` overrides it for the visualization; each entry is one ordered step. Return this skill's structured data under `architecture` in the marked Factory JSON result. The architecture contract remains unchanged.
 4. Factory renders `.factory/architecture/<run-id>.html` before draft creation and attaches it through `externalArtifacts`.
 
 For interactive `plan-mission`, preserve approval-first behavior. Do not create an artifact until the user approves the plan.

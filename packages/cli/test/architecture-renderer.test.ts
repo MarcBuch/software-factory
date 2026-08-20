@@ -97,3 +97,29 @@ test("architecture renderer uses exact fallbacks without inventing details", () 
     '<section id="flow"><h2>Resulting Request Flow</h2><pre><code>Unavailable detail</code>',
   );
 });
+
+function renderedSteps(changePlan: string, changePlanSteps?: string[]) {
+  const html = renderArchitectureHtml(
+    { ...input, changePlan, ...(changePlanSteps ? { changePlanSteps } : {}) },
+    architecture,
+  );
+  const outline = html.match(/<ol class="change-outline">(.*?)<\/ol>/)?.[1] ?? "";
+  return [...outline.matchAll(/<li>(.*?)<\/li>/g)].map((match) => match[1]);
+}
+
+test("architecture renderer prefers explicit non-empty steps and escapes them", () => {
+  expect(renderedSteps("1. Legacy", ["First <safe>", "Second & done"])).toEqual([
+    "First &lt;safe&gt;",
+    "Second &amp; done",
+  ]);
+});
+
+test("architecture renderer parses coherent legacy numbering only", () => {
+  expect(renderedSteps("1. First. 2. Second.")).toEqual(["First.", "Second."]);
+  expect(renderedSteps("1. First\n2. Second")).toEqual(["First", "Second"]);
+  expect(renderedSteps("1. Incidental prose")).toEqual(["1. Incidental prose"]);
+  expect(renderedSteps("1. First 2. Second")).toEqual(["1. First 2. Second"]);
+  expect(renderedSteps("1. First. 3. Skipped")).toEqual(["1. First. 3. Skipped"]);
+  expect(renderedSteps("1. First. 1. Repeated")).toEqual(["1. First. 1. Repeated"]);
+  expect(renderedSteps("Ordinary prose 1. Not a list.")).toEqual(["Ordinary prose 1. Not a list."]);
+});

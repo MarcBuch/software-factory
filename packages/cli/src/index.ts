@@ -856,7 +856,7 @@ const pc = jsonOption(
   plan
     .command("create")
     .description(
-      "Create a plan from JSON (input files may be outside the Git project). risks use {description, mitigation}; alternatives use {name, rejectedBecause}. Tests are verification tasks. Top level: missionTitle, intent, changePlan, risks, alternatives, acceptanceCriteria, verificationStrategy, verificationMode, and optional externalArtifacts. Example: " +
+      "Create a plan from JSON (input files may be outside the Git project). risks use {description, mitigation}; alternatives use {name, rejectedBecause}. Tests are verification tasks. Top level: missionTitle, intent, changePlan, optional changePlanSteps (ordered strings), risks, alternatives, acceptanceCriteria, verificationStrategy, verificationMode, and optional externalArtifacts. Example: " +
         JSON.stringify(PLAN_INPUT_EXAMPLE),
     ),
 )

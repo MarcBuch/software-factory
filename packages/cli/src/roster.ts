@@ -24,7 +24,7 @@ JSON object matching this schema: {"status":"success"|"failure","summary":string
 "targetLayers":[{"title":string,"detail":string,"code"?:string,"tone":"legacy"|"new"|"client"|"test"|"neutral"}],
 "seams":[{"title":string,"detail":string}],"dataModelChanges":{"summary":string,"requestLabel"?:string,"requestExample"?:string,"responseLabel"?:string,"responseExample"?:string,"stages":[{"stage":string,"responsibility":string,"preserves":string}],"compatibility"?:{"decision":string,"legacyTitle":string,"legacyItems":[string],"targetTitle":string,"targetItems":[string]}},
 "validation":{"groups":[{"title":string,"items":[string]}],"parityRows":[{"area":string,"comparison":string,"handling":string}]},"resultingRequestFlow":string},
-"plan":{"missionTitle":string,"intent":string,"changePlan":string,
+"plan":{"missionTitle":string,"intent":string,"changePlan":string,"changePlanSteps"?:["Step 1","Step 2"],
 "externalArtifacts"?:[{"path":string,"label"?:string}],
 "risks":[{"description":string,"mitigation":string}],
 "alternatives":[{"name":string,"rejectedBecause":string}],
