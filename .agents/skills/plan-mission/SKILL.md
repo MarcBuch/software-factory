@@ -31,7 +31,7 @@ Verification mode: fast | standard | exhaustive
 
 After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative. Approval is the gate: do not generate architecture artifacts, create a plan, or materialize a mission before explicit approval.
 
-Use the `visualize-change` skill for architecture visualization. It owns the exact document structure, evidence rules, structured data contract, and visual language. The skill returns data rather than writing files; Factory renders the self-contained HTML before `factory plan create` and attaches it through `externalArtifacts` at `.factory/architecture/<run-id>.html`.
+Use `visualize-change` for architecture visualization. It owns the exact document structure, evidence rules, visual language, and direct HTML authoring. In the Factory planner workflow it writes `.factory/architecture/<run-id>.html`; return `plan` plus one matching declaration in `artifacts`. Factory only validates, attaches, and persists it.
 
 Run the following ordered workflow, using each command's `--json` result and parsing its `.id` value (an agent may parse the tool output directly; `jq` is optional):
 
@@ -45,7 +45,7 @@ Plan creation and approval write only `.factory/plans.jsonl`. Materialization re
 
 - Always classify risk and state verification mode.
 - Always present the plan and STOP for approval.
-- The Factory `planner` workflow is the exception: after exploration, load `visualize-change`, return its structured data under `architecture` with the complete plan input, and let the workflow render the HTML and persist exactly one non-executable draft. It still must not approve or materialize that draft.
+- The Factory `planner` workflow is the exception: after exploration, load `visualize-change`, write the exact run artifact, and return the complete plan plus its artifact declaration. Factory validates the existing bytes and persists exactly one non-executable draft.
 - Never call `mission_init` from this skill or begin implementation before approval.
 - Keep verification proportional; explain any dedicated verification task.
 - Do not create missions, milestones, or tasks directly in this workflow.

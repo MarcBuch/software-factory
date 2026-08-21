@@ -160,12 +160,13 @@ test("planner roster renders a delegated, workflow-persisted draft plan prompt",
   const rendered = renderAgentPrompts("planner", "Plan notifications");
   expect(rendered.systemPrompt).toContain("codebase-explorer");
   expect(rendered.systemPrompt).toContain("visualize-change");
-  expect(rendered.systemPrompt).toContain("Factory plan input in result.plan");
-  expect(rendered.systemPrompt).toContain("workflow renders the HTML");
+  expect(rendered.systemPrompt).toContain("codebase-explorer");
+  expect(rendered.systemPrompt).toContain("result.plan");
+  expect(rendered.systemPrompt).toContain("write the exact run artifact");
   expect(rendered.systemPrompt).toContain("appends its pln_ ID");
   expect(rendered.systemPrompt).toContain('"plan":{"missionTitle":string');
   expect(rendered.systemPrompt).toContain(
-    "For a successful result, plan and architecture are required",
+    "For a successful result, plan and exactly one architecture artifact declaration are required",
   );
   expect(rendered.systemPrompt).toContain("Do not approve, materialize, revise, archive");
   expect(rendered.systemPrompt).not.toContain("Do not include planning");

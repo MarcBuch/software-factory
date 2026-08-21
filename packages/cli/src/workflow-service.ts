@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import {
-  link,
   mkdir,
   open,
   readFile,
@@ -9,11 +8,11 @@ import {
   writeFile,
   lstat,
   unlink,
+  readdir,
 } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { renderArchitectureHtml } from "./architecture-renderer";
 import { OpenCodeAdapter, type BackendAdapter, type BackendProcess } from "./backend";
 import { completeAgent } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
@@ -179,6 +178,85 @@ function completedVisualization(outcome: WorkflowOutcome) {
   return false;
 }
 
+const MAX_ARCHITECTURE_BYTES = 1024 * 1024;
+async function validateArchitectureArtifact(root: string, path: string) {
+  const file = join(root, path);
+  const factory = join(root, ".factory");
+  const architecture = join(factory, "architecture");
+  for (const directory of [factory, architecture]) {
+    const stat = await lstat(directory);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      throw Error("Architecture artifact has unsafe parent directory");
+  }
+  const stat = await lstat(file);
+  if (stat.isSymbolicLink() || !stat.isFile())
+    throw Error("Architecture artifact must be a regular file");
+  const handle = await open(file, "r");
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) throw Error("Architecture artifact must be a regular file");
+    const html = (await handle.readFile()).toString("utf8");
+    await handle.close();
+    if (Buffer.byteLength(html) > MAX_ARCHITECTURE_BYTES)
+      throw Error("Architecture artifact is too large");
+    if (
+      !/^<!doctype html>/i.test(html) ||
+      !/<html\b/i.test(html) ||
+      !/<head\b/i.test(html) ||
+      !/<body\b/i.test(html) ||
+      !/<\/html>/i.test(html) ||
+      !/<\/head>/i.test(html) ||
+      !/<\/body>/i.test(html)
+    )
+      throw Error("Architecture artifact must be standalone HTML");
+    if (
+      /<\s*(?:script|iframe|object|embed|form|base|link|svg|math)\b|\bon[a-z]+\s*=|\b(?:src|srcset|action|formaction|poster|data)\s*=|\b(?:href)\s*=\s*["']\s*(?!#)|@import\b|url\s*\(/i.test(
+        html,
+      )
+    )
+      throw Error("Architecture artifact contains unsafe HTML");
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+type ArchitectureState = Readonly<Record<string, string>>;
+async function architectureState(root: string): Promise<ArchitectureState> {
+  const directory = join(root, ".factory", "architecture");
+  const parent = await lstat(join(root, ".factory")).catch(() => undefined);
+  if (parent && (parent.isSymbolicLink() || !parent.isDirectory()))
+    throw Error("Unsafe Factory architecture parent");
+  const stat = await lstat(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!stat) return {};
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw Error("Unsafe architecture directory");
+  const state: Record<string, string> = {};
+  const walk = async (current: string, prefix: string) => {
+    for (const name of await readdir(current)) {
+      const entry = join(current, name);
+      const entryStat = await lstat(entry);
+      const key = prefix ? `${prefix}/${name}` : name;
+      if (entryStat.isSymbolicLink()) throw Error("Unsafe architecture entry");
+      if (entryStat.isDirectory()) await walk(entry, key);
+      else if (entryStat.isFile()) state[key] = (await readFile(entry)).toString("base64");
+      else throw Error("Unsafe architecture entry");
+    }
+  };
+  await walk(directory, "");
+  return state;
+}
+
+function architectureMutated(before: ArchitectureState, after: ArchitectureState, runFile: string) {
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const name of names) {
+    if (name === runFile && before[name] === undefined) continue;
+    if (before[name] !== after[name]) return true;
+  }
+  return false;
+}
+
 type FactoryFile = Readonly<{ content?: string }>;
 type FactoryState = Readonly<{ plans: FactoryFile; missions: FactoryFile }>;
 async function factoryState(root: string): Promise<FactoryState> {
@@ -245,6 +323,7 @@ export async function startWorkflow(
     storage = await openWorkflowStorage(root);
     const boundary = await captureGitBoundary({ repositoryRoot: root });
     const initialFactoryState = await factoryState(root);
+    const initialArchitectureState = await architectureState(root);
     const preliminary = renderAgentPrompts(agent.name, parsed.request, {});
     run = await storage.createRun({
       systemPrompt: preliminary.systemPrompt,
@@ -258,6 +337,7 @@ export async function startWorkflow(
     const prompts = renderAgentPrompts(agent.name, parsed.request, {
       runId: run.id,
       storagePath: relative(root, run.files.directory),
+      expectedArtifactPath: `.factory/architecture/${run.id}.html`,
     });
     await Bun.write(run.files.systemPrompt, prompts.systemPrompt);
     await Bun.write(run.files.userPrompt, prompts.userPrompt);
@@ -316,6 +396,7 @@ export async function startWorkflow(
       prompts,
       boundary,
       initialFactoryState,
+      initialArchitectureState,
       root,
       lock,
     });
@@ -341,12 +422,27 @@ async function completeWorkflow(args: {
   prompts: ReturnType<typeof renderAgentPrompts>;
   boundary: Awaited<ReturnType<typeof captureGitBoundary>>;
   initialFactoryState: FactoryState;
+  initialArchitectureState: ArchitectureState;
   root: string;
   lock: WorkflowLock;
 }): Promise<RunRecord | undefined> {
-  const { storage, run, processRun, agent, prompts, boundary, initialFactoryState, root, lock } =
-    args;
+  const {
+    storage,
+    run,
+    processRun,
+    agent,
+    prompts,
+    boundary,
+    initialFactoryState,
+    initialArchitectureState,
+    root,
+    lock,
+  } = args;
+  let draftPersisted = false;
+  const currentArtifact = join(root, ".factory", "architecture", `${run.id}.html`);
   try {
+    if (agent.name === "planner" && (await lstat(currentArtifact).catch(() => undefined)))
+      throw Error("Planner architecture artifact must not pre-exist");
     const invocation = {
       repositoryRoot: root,
       runId: run.id,
@@ -400,44 +496,37 @@ async function completeWorkflow(args: {
       if (!completedVisualization(outcome))
         throw Error("Planner must complete the visualize-change skill");
       if (!result.plan) throw Error("Planner must return a complete plan input");
-      if (!result.architecture)
-        throw Error("Planner must return complete visualize-change architecture data");
       const artifactPath = join(".factory", "architecture", `${run.id}.html`);
-      const artifactFile = join(root, artifactPath);
-      const artifactDirectory = join(root, ".factory", "architecture");
-      await mkdir(artifactDirectory, { recursive: true });
-      try {
-        await lstat(artifactFile);
-        throw Error(`Generated architecture artifact already exists: ${artifactPath}`);
-      } catch (error: any) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-      const temporary = `${artifactFile}.tmp.${crypto.randomUUID()}`;
-      let published = false;
-      try {
-        await writeFile(temporary, renderArchitectureHtml(result.plan, result.architecture), {
-          encoding: "utf8",
-          flag: "wx",
-        });
-        await link(temporary, artifactFile);
-        published = true;
-      } finally {
-        await rm(temporary, { force: true });
-      }
+      const declarations = result.artifacts.filter((artifact) => artifact.kind === "architecture");
+      if (
+        result.artifacts.length !== 1 ||
+        declarations.length !== 1 ||
+        declarations[0].path !== artifactPath
+      )
+        throw Error("Planner must declare exactly one matching architecture artifact");
+      const externalArtifacts = result.plan.externalArtifacts ?? [];
+      if (
+        externalArtifacts.some((artifact) => artifact.path === artifactPath) ||
+        new Set(externalArtifacts.map((artifact) => artifact.path)).size !==
+          externalArtifacts.length
+      )
+        throw Error(
+          "Planner must not duplicate the architecture artifact in plan.externalArtifacts",
+        );
+      const afterArchitectureState = await architectureState(root);
+      if (architectureMutated(initialArchitectureState, afterArchitectureState, `${run.id}.html`))
+        throw Error("Planner may only create the current run architecture artifact");
+      await validateArchitectureArtifact(root, artifactPath);
       const planInput = {
         ...result.plan,
         externalArtifacts: [
           ...(result.plan.externalArtifacts ?? []),
-          { path: artifactPath, label: "Generated architecture reference" },
+          { path: artifactPath, label: declarations[0].description },
         ],
       };
       let plan;
-      try {
-        plan = await createDraftPlan(planInput, join(root, ".factory", "plans.jsonl"), root);
-      } catch (error) {
-        if (published) await rm(artifactFile, { force: true });
-        throw error;
-      }
+      plan = await createDraftPlan(planInput, join(root, ".factory", "plans.jsonl"), root);
+      draftPersisted = true;
       if ((await factoryState(root)).missions.content !== initialFactoryState.missions.content)
         throw Error("Planner draft creation changed mission state");
       result = {
@@ -488,6 +577,10 @@ async function completeWorkflow(args: {
       failure,
     );
   } catch (error) {
+    if (agent.name === "planner") {
+      await restoreFactoryState(root, initialFactoryState).catch(() => undefined);
+      await rm(currentArtifact, { force: true }).catch(() => undefined);
+    } else if (!draftPersisted) await rm(currentArtifact, { force: true }).catch(() => undefined);
     return terminalFailure(storage, run, error);
   } finally {
     try {

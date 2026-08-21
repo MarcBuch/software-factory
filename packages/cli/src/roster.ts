@@ -19,18 +19,13 @@ const PLANNER_RESULT_INSTRUCTIONS = `Return only one result between the exact ma
 ${FACTORY_RESULT_START} and ${FACTORY_RESULT_END}. The content must be a
 JSON object matching this schema: {"status":"success"|"failure","summary":string,
 "artifacts":[{"path":string,"kind":string,"description":string}],"notes":[string],
-"architecture":{"lede":string,"statusTags":[{"label":string,"tone":"legacy"|"new"|"client"|"test"|"neutral"}],
-"currentComposition":{"summary":string,"groups":[{"title":string,"tone":"legacy"|"new"|"client"|"test"|"neutral","items":[{"title":string,"detail":string,"code"?:string}]}]},
-"targetLayers":[{"title":string,"detail":string,"code"?:string,"tone":"legacy"|"new"|"client"|"test"|"neutral"}],
-"seams":[{"title":string,"detail":string}],"dataModelChanges":{"summary":string,"requestLabel"?:string,"requestExample"?:string,"responseLabel"?:string,"responseExample"?:string,"stages":[{"stage":string,"responsibility":string,"preserves":string}],"compatibility"?:{"decision":string,"legacyTitle":string,"legacyItems":[string],"targetTitle":string,"targetItems":[string]}},
-"validation":{"groups":[{"title":string,"items":[string]}],"parityRows":[{"area":string,"comparison":string,"handling":string}]},"resultingRequestFlow":string},
 "plan":{"missionTitle":string,"intent":string,"changePlan":string,"changePlanSteps"?:["Step 1","Step 2"],
 "externalArtifacts"?:[{"path":string,"label"?:string}],
 "risks":[{"description":string,"mitigation":string}],
 "alternatives":[{"name":string,"rejectedBecause":string}],
 "acceptanceCriteria":[string],"verificationStrategy":string,
 "verificationMode":"fast"|"standard"|"exhaustive"}}.
-For a successful result, plan and architecture are required. Complete the visualize-change skill first.
+For a successful result, plan and exactly one architecture artifact declaration are required; notes are also required. The artifact path is exactly the concrete path in Run context. Delegate repository exploration to codebase-explorer, complete visualize-change, and write the exact run artifact first.
 Put the complete readable plan in summary. The workflow creates one draft and appends its pln_ ID.
 Do not approve, materialize, revise, archive, create missions, run commands or tests, make commits,
 retry, or hand off work.`;
@@ -51,10 +46,10 @@ export const PLANNER_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.par
   opencodeAgent: "plan-mission",
   purpose: "Explore a repository and create exactly one draft mission plan",
   model: "github-copilot/gpt-5.6-terra",
-  systemPrompt: `You are the planner for Software Factory. First delegate repository exploration with the task tool to the codebase-explorer subagent. Then load the visualize-change skill and apply it to the exploration findings and proposed plan. Return the complete Factory plan input in result.plan and the skill's structured visualization data in result.architecture. The workflow renders the HTML, validates and persists exactly one draft, then appends its pln_ ID to the result summary. Do not write HTML, approve, materialize, revise, archive, create missions, run commands or tests, make commits, or modify the repository. ${PLANNER_RESULT_INSTRUCTIONS}`,
-  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nExplore first, load visualize-change, return the complete plan and structured architecture data, and let the workflow render the HTML and create the draft.`,
-  allowedTools: ["task", "skill", "read", "glob", "grep"],
-  writeBoundary: [],
+  systemPrompt: `You are the planner for Software Factory. Explore first, then load visualize-change and write only the exact run architecture HTML artifact. Return the complete plan in result.plan and its one matching declaration in result.artifacts. Factory validates and persists exactly one draft. Do not approve, materialize, revise, archive, create missions, run commands or tests, commit, or write other files. ${PLANNER_RESULT_INSTRUCTIONS}`,
+  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nExplore first, load visualize-change, write the exact expectedArtifactPath, then return the complete plan, notes, and one artifact declaration.`,
+  allowedTools: ["task", "skill", "read", "glob", "grep", "edit"],
+  writeBoundary: [".factory/architecture"],
 });
 
 export const BUILTIN_ROSTER: readonly AgentRosterEntry[] = Object.freeze([
