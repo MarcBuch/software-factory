@@ -17,6 +17,7 @@ import { z } from "zod";
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
   createDraftPlan,
+  deletePlanCascade,
   loadPlanRecords,
   loadPlans,
   PlanSchema,
@@ -30,7 +31,7 @@ import {
   type MissionReference,
 } from "./plans";
 import { lookupRoster } from "./roster";
-import { withFactoryLock } from "./storage";
+import { recoverFactoryTransaction, replaceFactoryPair, withFactoryLock } from "./storage";
 import { startUiServer } from "./ui";
 import { startWorkflow } from "./workflow-service";
 import { openWorkflowStorage } from "./workflow-storage";
@@ -198,7 +199,14 @@ function normalizeLegacyMission(value: unknown) {
   };
 }
 
-const withLock = withFactoryLock;
+const withLock = <T>(fn: () => Promise<T>) =>
+  projectRoot().then((root) => withFactoryLock(root, fn));
+async function withStoreRead<T>(fn: () => Promise<T>) {
+  return withLock(async () => {
+    await recoverFactoryTransaction(await projectRoot());
+    return fn();
+  });
+}
 async function save(missions: MissionType[]) {
   const p = await paths();
   validateAll(missions);
@@ -214,6 +222,28 @@ async function save(missions: MissionType[]) {
   } finally {
     await rm(tmp, { force: true });
   }
+}
+async function savePlanCascade(plans: Plan[], missions: MissionType[], planFile: string) {
+  const p = await paths();
+  validatePlansAgainstMissions(plans, []);
+  validateAll(missions);
+  const planData =
+      [
+        JSON.stringify({ type: "plans-metadata", schemaVersion: 1 }),
+        ...plans.map((plan) => JSON.stringify(plan)),
+      ].join("\n") + "\n",
+    missionData =
+      [
+        JSON.stringify({ type: "metadata", schemaVersion: 1 }),
+        ...missions.map((mission) => JSON.stringify(mission)),
+      ].join("\n") + "\n",
+    originalPlans = (await Bun.file(planFile).exists())
+      ? await Bun.file(planFile).text()
+      : undefined,
+    originalMissions = (await Bun.file(p.file).exists())
+      ? await Bun.file(p.file).text()
+      : undefined;
+  await replaceFactoryPair(p.root, planData, missionData, originalPlans, originalMissions);
 }
 function isJson(cmd: Command) {
   return cmd.optsWithGlobals().json === true;
@@ -580,17 +610,21 @@ tc.action(async (opts, cmd) =>
   }),
 );
 const list = jsonOption(mission.command("list"));
-list.action(async (_, cmd) => {
-  const p = await paths();
-  output(await load(p.file), isJson(cmd));
-});
+list.action(async (_, cmd) =>
+  withStoreRead(async () => {
+    const p = await paths();
+    output(await load(p.file), isJson(cmd));
+  }),
+);
 const show = jsonOption(mission.command("show").argument("<mission-id>"));
-show.action(async (idArg, _, cmd) => {
-  const p = await paths(),
-    m = (await load(p.file)).find((x) => x.id === idArg);
-  if (!m) throw Error(`Mission not found: ${idArg}`);
-  output(m, isJson(cmd));
-});
+show.action(async (idArg, _, cmd) =>
+  withStoreRead(async () => {
+    const p = await paths(),
+      m = (await load(p.file)).find((x) => x.id === idArg);
+    if (!m) throw Error(`Mission not found: ${idArg}`);
+    output(m, isJson(cmd));
+  }),
+);
 const update = jsonOption(
   mission.command("update").argument("<task-id>").requiredOption("--status <status>"),
 );
@@ -634,27 +668,29 @@ close.action(async (idArg, opts, cmd) =>
   }),
 );
 const ready = jsonOption(mission.command("ready").option("--mission <mission-id>"));
-ready.action(async (opts, cmd) => {
-  const all = await load((await paths()).file);
-  const selected = opts.mission ? all.filter((m) => m.id === opts.mission) : all;
-  if (opts.mission && !selected.length) throw Error(`Mission not found: ${opts.mission}`);
-  output(
-    selected.flatMap((m) =>
-      m.milestones.flatMap((ms) =>
-        ms.tasks
-          .filter((t) => t.status === "open")
-          .map((task) => ({
-            missionId: m.id,
-            missionTitle: m.title,
-            milestoneId: ms.id,
-            milestoneTitle: ms.title,
-            task,
-          })),
+ready.action(async (opts, cmd) =>
+  withStoreRead(async () => {
+    const all = await load((await paths()).file);
+    const selected = opts.mission ? all.filter((m) => m.id === opts.mission) : all;
+    if (opts.mission && !selected.length) throw Error(`Mission not found: ${opts.mission}`);
+    output(
+      selected.flatMap((m) =>
+        m.milestones.flatMap((ms) =>
+          ms.tasks
+            .filter((t) => t.status === "open")
+            .map((task) => ({
+              missionId: m.id,
+              missionTitle: m.title,
+              milestoneId: ms.id,
+              milestoneTitle: ms.title,
+              task,
+            })),
+        ),
       ),
-    ),
-    isJson(cmd),
-  );
-});
+      isJson(cmd),
+    );
+  }),
+);
 
 // Plans deliberately use the same lock and atomic JSONL writer as missions. Mission
 // linkage is validation-only here; execution/link updates belong to a later command.
@@ -883,16 +919,32 @@ pc.action(async (opts, cmd) => {
 });
 const pl = jsonOption(plan.command("list"));
 pl.action(async (_, cmd) => {
-  const { p } = await planContext();
-  output(await loadPlans(join(p.dir, "plans.jsonl"), []), isJson(cmd));
+  await withStoreRead(async () => {
+    const { p } = await planContext();
+    output(await loadPlans(join(p.dir, "plans.jsonl"), []), isJson(cmd));
+  });
 });
+const pd = jsonOption(plan.command("delete")).argument("<plan-id>");
+pd.action(async (id, _, cmd) =>
+  withLock(async () => {
+    const { p } = await planContext();
+    const planFile = join(p.dir, "plans.jsonl"),
+      plans = await loadPlans(planFile, []),
+      missions = await load(p.file),
+      result = deletePlanCascade(plans, missions, id);
+    await savePlanCascade(result.plans, result.missions, planFile);
+    output({ deleted: true, planId: id }, isJson(cmd));
+  }),
+);
 const ps = jsonOption(plan.command("show")).argument("<plan-id>").option("--revision <revision>");
 ps.action(async (id, opts, cmd) => {
-  const { p } = await planContext();
-  output(
-    selectedRevision(await loadPlans(join(p.dir, "plans.jsonl"), []), id, opts.revision),
-    isJson(cmd),
-  );
+  await withStoreRead(async () => {
+    const { p } = await planContext();
+    output(
+      selectedRevision(await loadPlans(join(p.dir, "plans.jsonl"), []), id, opts.revision),
+      isJson(cmd),
+    );
+  });
 });
 const pv = jsonOption(plan.command("validate"))
   .argument("[plan-id]")
@@ -908,10 +960,12 @@ pv.action(async (id, opts, cmd) => {
     output({ valid: true, count: 1 }, isJson(cmd));
     return;
   }
-  const { p } = await planContext();
-  const all = await loadPlans(join(p.dir, "plans.jsonl"), []);
-  const result = id ? [selectedRevision(all, id, opts.revision)] : all;
-  output({ valid: true, count: result.length }, isJson(cmd));
+  await withStoreRead(async () => {
+    const { p } = await planContext();
+    const all = await loadPlans(join(p.dir, "plans.jsonl"), []);
+    const result = id ? [selectedRevision(all, id, opts.revision)] : all;
+    output({ valid: true, count: result.length }, isJson(cmd));
+  });
 });
 const pr = jsonOption(plan.command("revise"))
   .argument("<plan-id>")

@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile, type ExecFileException } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PlanInputSchema } from "@software-factory/contracts";
 
-import { resolveDependencies, PlanSchema, validatePlansAgainstMissions } from "../src/plans";
+import {
+  deletePlanCascade,
+  resolveDependencies,
+  PlanSchema,
+  validatePlansAgainstMissions,
+} from "../src/plans";
 
 const cli = join(import.meta.dir, "..", "src", "index.ts"),
   repos = new Set<string>();
@@ -27,6 +32,48 @@ test("changePlanSteps requires non-empty entries", () => {
   expect(
     PlanInputSchema.parse({ ...base, changePlanSteps: ["First", "Second"] }).changePlanSteps,
   ).toEqual(["First", "Second"]);
+});
+
+test("plan cascade deletion removes all revisions and linked missions only", () => {
+  const plan = PlanSchema.parse({
+    id: "pln_cascade",
+    missionTitle: "M",
+    intent: "I",
+    changePlan: "C",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["done"],
+    verificationStrategy: "verify",
+    verificationMode: "fast",
+    revision: 1,
+    status: "draft",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const result = deletePlanCascade(
+    [
+      plan,
+      {
+        ...plan,
+        revision: 2,
+        createdAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      },
+    ],
+    [
+      { sourcePlan: { planId: plan.id, revision: 1 } },
+      { sourcePlan: { planId: plan.id, revision: 2 } },
+      { sourcePlan: { planId: "pln_other", revision: 1 } },
+      { external: true },
+    ],
+    plan.id,
+  );
+  expect(result.plans).toEqual([]);
+  expect(result.missions).toEqual([
+    { sourcePlan: { planId: "pln_other", revision: 1 } },
+    { external: true },
+  ]);
+  expect(() => deletePlanCascade([plan], [], "pln_missing")).toThrow("Plan not found");
 });
 function run(
   cwd: string,
@@ -133,6 +180,140 @@ async function materialize(d: string, id: string) {
   return run(d, "plan", "materialize", id, "--input", await missionInput(d), "--json");
 }
 describe("standalone plans", () => {
+  test("plan delete atomically cascades persisted revisions and missions", async () => {
+    const d = await repo(),
+      input = await planInput(d),
+      target = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout),
+      unrelated = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout);
+    await run(d, "plan", "approve", target.id, "--json");
+    const linked = JSON.parse((await materialize(d, target.id)).stdout),
+      planFile = join(d, ".factory/plans.jsonl"),
+      missionFile = join(d, ".factory/missions.jsonl"),
+      plans = (await readFile(planFile, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+    plans[1].status = "superseded";
+    plans[1].approvedAt = plans[1].updatedAt;
+    plans.push({ ...plans[1], revision: 2, status: "draft", approvedAt: undefined });
+    delete plans.at(-1).approvedAt;
+    const secondMission = {
+      ...linked,
+      id: `mis_${"2".repeat(32)}`,
+      milestones: [],
+      sourcePlan: { planId: target.id, revision: 2 },
+    };
+    await writeFile(planFile, plans.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    await writeFile(
+      missionFile,
+      [
+        JSON.stringify({ type: "metadata", schemaVersion: 1 }),
+        JSON.stringify(linked),
+        JSON.stringify(secondMission),
+      ].join("\n") + "\n",
+    );
+    await run(d, "mission", "create", "--title", "Unrelated", "--json");
+    await run(d, "plan", "approve", unrelated.id, "--json");
+    const deleted = await run(d, "plan", "delete", target.id, "--json");
+    expect(deleted.exitCode).toBe(0);
+    expect((await readFile(planFile, "utf8")).split("\n").filter(Boolean)).toHaveLength(2);
+    expect((await run(d, "plan", "list", "--json")).stdout).not.toContain(target.id);
+    expect((await run(d, "plan", "list", "--json")).stdout).toContain(unrelated.id);
+    expect((await run(d, "mission", "list", "--json")).stdout).not.toContain(target.id);
+    expect((await run(d, "mission", "list", "--json")).stdout).toContain("mis_");
+  });
+
+  test("missing and failed plan deletes preserve both stores", async () => {
+    const d = await repo(),
+      input = await planInput(d),
+      plan = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout),
+      planFile = join(d, ".factory/plans.jsonl"),
+      missionFile = join(d, ".factory/missions.jsonl"),
+      beforePlans = await readFile(planFile),
+      beforeMissions = await readFile(missionFile);
+    expect((await run(d, "plan", "delete", "pln_missing", "--json")).exitCode).not.toBe(0);
+    expect(await readFile(planFile)).toEqual(beforePlans);
+    expect(await readFile(missionFile)).toEqual(beforeMissions);
+    const failed = await new Promise<{ exitCode: number }>((resolve) =>
+      execFile(
+        "bun",
+        [cli, "plan", "delete", plan.id, "--json"],
+        {
+          cwd: d,
+          env: { ...process.env, FACTORY_TEST_FAIL_PLAN_CASCADE: "after-plans" },
+        },
+        (error) => resolve({ exitCode: error ? 1 : 0 }),
+      ),
+    );
+    expect(failed.exitCode).not.toBe(0);
+    expect(await readFile(planFile)).toEqual(beforePlans);
+    expect(await readFile(missionFile)).toEqual(beforeMissions);
+  });
+
+  test("non-delete plan reads recover a stale cascade journal first", async () => {
+    const d = await repo(),
+      input = await planInput(d),
+      plan = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout),
+      planFile = join(d, ".factory/plans.jsonl"),
+      missionFile = join(d, ".factory/missions.jsonl"),
+      journal = join(d, ".factory/plan-cascade.transaction.json"),
+      canonicalRoot = await realpath(d),
+      originalPlans = await readFile(planFile, "utf8"),
+      originalMissions = await readFile(missionFile, "utf8"),
+      recoveredPlans = `${JSON.stringify({ type: "plans-metadata", schemaVersion: 1 })}\n`;
+    await writeFile(
+      journal,
+      JSON.stringify({
+        phase: "committed",
+        planFile: join(canonicalRoot, ".factory/plans.jsonl"),
+        missionFile: join(canonicalRoot, ".factory/missions.jsonl"),
+        originalPlans: { present: true, data: originalPlans },
+        originalMissions: { present: true, data: originalMissions },
+        planData: { present: true, data: recoveredPlans },
+        missionData: { present: true, data: originalMissions },
+      }),
+    );
+    await writeFile(planFile, recoveredPlans);
+    const listed = await run(d, "plan", "list", "--json");
+    expect(listed).toMatchObject({ exitCode: 0 });
+    expect(listed.stdout).toBe("[]\n");
+    expect(await Bun.file(journal).exists()).toBe(false);
+    expect((await run(d, "plan", "show", plan.id, "--json")).exitCode).not.toBe(0);
+  });
+
+  test("nested worktree readers recover stale cascade state", async () => {
+    const d = await repo(),
+      nested = join(d, "nested", "worktree"),
+      input = await planInput(d),
+      plan = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout),
+      planFile = join(d, ".factory/plans.jsonl"),
+      missionFile = join(d, ".factory/missions.jsonl"),
+      journal = join(d, ".factory/plan-cascade.transaction.json"),
+      canonicalRoot = await realpath(d),
+      originalPlans = await readFile(planFile, "utf8"),
+      originalMissions = await readFile(missionFile, "utf8"),
+      recoveredPlans = `${JSON.stringify({ type: "plans-metadata", schemaVersion: 1 })}\n`;
+    await mkdir(nested, { recursive: true });
+    await writeFile(
+      journal,
+      JSON.stringify({
+        phase: "committed",
+        planFile: join(canonicalRoot, ".factory/plans.jsonl"),
+        missionFile: join(canonicalRoot, ".factory/missions.jsonl"),
+        originalPlans: { present: true, data: originalPlans },
+        originalMissions: { present: true, data: originalMissions },
+        planData: { present: true, data: recoveredPlans },
+        missionData: { present: true, data: originalMissions },
+      }),
+    );
+    await writeFile(planFile, recoveredPlans);
+    const result = await run(nested, "plan", "list", "--json");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("[]\n");
+    expect(await Bun.file(journal).exists()).toBe(false);
+    expect((await run(d, "plan", "show", plan.id, "--json")).exitCode).not.toBe(0);
+  });
+
   test("create writes plans only and materialize faithfully resolves IDs", async () => {
     const d = await repo(),
       input = await planInput(d),

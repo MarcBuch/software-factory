@@ -190,6 +190,76 @@ test("workflow CLI invokes the planner roster entry", async () => {
   expect(await Bun.file(join(p.dir, ".factory", "missions.jsonl")).exists()).toBe(false);
 });
 
+test("planner restore rejects a mutation after its post-state snapshot", async () => {
+  const barrier = join(await mkdtemp(join(tmpdir(), "factory-barrier-")), "captured");
+  const plan = {
+    missionTitle: "Conflict",
+    verificationMode: "fast",
+    intent: "Intent",
+    changePlan: "Approach",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accepted"],
+    verificationStrategy: "Run focused test",
+  };
+  const fake = await fakeScript(
+    `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); await new Promise(r=>setTimeout(r,1000)); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"visualize",state:{status:"completed",input:{name:"visualize-change"},output:"skill"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"ok",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"architecture"}],notes:[],plan:${JSON.stringify(plan)}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content,sessionID:"test-session"})+String.fromCharCode(10));`,
+  );
+  const p = await repo(fake);
+  const env = { ...p.env, FACTORY_TEST_PLANNER_POST_STATE_BARRIER: barrier };
+  const workflow = runAsync(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    env,
+  );
+  for (let i = 0; i < 400 && !(await Bun.file(barrier).exists()); i++) await Bun.sleep(25);
+  expect(await Bun.file(barrier).exists()).toBe(true);
+  const mutation = await run(p.dir, ["mission", "create", "--title", "External", "--json"]);
+  expect(mutation.code).toBe(0);
+  const missions = await readFile(join(p.dir, ".factory", "missions.jsonl"), "utf8");
+  await writeFile(`${barrier}.release`, "release\n");
+  await workflow.done;
+  const output = JSON.parse(workflow.stdout());
+  expect(output.run.status).toBe("failed");
+  expect(output.run.failure.message).toContain("Factory state restoration failed");
+  expect(await readFile(join(p.dir, ".factory", "missions.jsonl"), "utf8")).toBe(missions);
+});
+
+test("planner rejects an external plan write before draft creation", async () => {
+  const barrier = join(await mkdtemp(join(tmpdir(), "factory-draft-barrier-")), "ready");
+  const plan = {
+    missionTitle: "Conflict",
+    verificationMode: "fast",
+    intent: "Intent",
+    changePlan: "Approach",
+    risks: [],
+    alternatives: [],
+    acceptanceCriteria: ["Accepted"],
+    verificationStrategy: "Run focused test",
+  };
+  const fake = await fakeScript(
+    `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"visualize",state:{status:"completed",input:{name:"visualize-change"},output:"skill"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"ok",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"architecture"}],notes:[],plan:${JSON.stringify(plan)}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+  );
+  const p = await repo(fake);
+  const input = join(p.dir, "external-plan.json");
+  await writeFile(input, JSON.stringify(plan));
+  const workflow = runAsync(p.dir, ["workflow", "run", "--agent", "planner", "plan it", "--json"], {
+    ...p.env,
+    FACTORY_TEST_PLANNER_POST_STATE_BARRIER: barrier,
+  });
+  for (let i = 0; i < 400 && !(await Bun.file(barrier).exists()); i++) await Bun.sleep(25);
+  expect(await Bun.file(barrier).exists()).toBe(true);
+  const external = await run(p.dir, ["plan", "create", "--input", input, "--json"]);
+  expect(external.code).toBe(0);
+  const plans = await readFile(join(p.dir, ".factory", "plans.jsonl"), "utf8");
+  await writeFile(`${barrier}.release`, "release\n");
+  await workflow.done;
+  const output = JSON.parse(workflow.stdout());
+  expect(output.run.status).toBe("failed");
+  expect(output.run.failure.message).toContain("Factory state restoration failed");
+  expect(await readFile(join(p.dir, ".factory", "plans.jsonl"), "utf8")).toBe(plans);
+});
+
 test("planner refuses to persist a draft without codebase exploration", async () => {
   const p = await repo(
     await fakeScript(

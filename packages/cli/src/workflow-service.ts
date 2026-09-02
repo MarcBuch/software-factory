@@ -1,15 +1,5 @@
 import { execFile } from "node:child_process";
-import {
-  mkdir,
-  open,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-  lstat,
-  unlink,
-  readdir,
-} from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, lstat, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -18,6 +8,7 @@ import { completeAgent } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
 import { createDraftPlan } from "./plans";
 import { lookupRoster, renderAgentPrompts } from "./roster";
+import { recoverFactoryTransaction, replaceFactoryPair, withFactoryLock } from "./storage";
 import { WorkflowInputSchema, type WorkflowInput } from "./workflow";
 import { openWorkflowStorage, type RunRecord } from "./workflow-storage";
 
@@ -259,7 +250,19 @@ function architectureMutated(before: ArchitectureState, after: ArchitectureState
 
 type FactoryFile = Readonly<{ content?: string }>;
 type FactoryState = Readonly<{ plans: FactoryFile; missions: FactoryFile }>;
+export class FactoryStateConcurrencyConflict extends Error {
+  constructor() {
+    super("Factory plan or mission state changed concurrently; refusing to restore it");
+    this.name = "FactoryStateConcurrencyConflict";
+  }
+}
 async function factoryState(root: string): Promise<FactoryState> {
+  return withFactoryLock(root, async () => {
+    await recoverFactoryTransaction(root);
+    return factoryStateUnlocked(root);
+  });
+}
+async function factoryStateUnlocked(root: string): Promise<FactoryState> {
   const read = async (name: string): Promise<FactoryFile> => {
     const file = join(root, ".factory", name);
     const stat = await lstat(file).catch((error: NodeJS.ErrnoException) => {
@@ -273,16 +276,26 @@ async function factoryState(root: string): Promise<FactoryState> {
   };
   return { plans: await read("plans.jsonl"), missions: await read("missions.jsonl") };
 }
-async function restoreFactoryState(root: string, state: FactoryState) {
-  for (const [name, content] of Object.entries(state)) {
-    const file = join(root, ".factory", `${name}.jsonl`);
-    const stat = await lstat(file).catch(() => undefined);
-    if (stat?.isSymbolicLink()) await unlink(file);
-    if (content.content === undefined) await rm(file, { force: true });
-    else await writeFile(file, content.content, { mode: 0o600 });
-  }
-  if (JSON.stringify(await factoryState(root)) !== JSON.stringify(state))
-    throw Error("Factory state restoration failed");
+export async function restoreFactoryState(
+  root: string,
+  state: FactoryState,
+  expectedState: FactoryState = state,
+) {
+  await withFactoryLock(root, async () => {
+    await recoverFactoryTransaction(root);
+    const current = await factoryStateUnlocked(root);
+    if (JSON.stringify(current) !== JSON.stringify(expectedState))
+      throw new FactoryStateConcurrencyConflict();
+    await replaceFactoryPair(
+      root,
+      state.plans.content ?? undefined,
+      state.missions.content ?? undefined,
+      current.plans.content ?? undefined,
+      current.missions.content ?? undefined,
+    );
+    if (JSON.stringify(await factoryStateUnlocked(root)) !== JSON.stringify(state))
+      throw Error("Factory state restoration failed");
+  });
 }
 
 async function terminalFailure(
@@ -439,6 +452,9 @@ async function completeWorkflow(args: {
     lock,
   } = args;
   let draftPersisted = false;
+  let plannerPostState: FactoryState | undefined;
+  let plannerStateRestoreAttempted = false;
+  let factoryChangedDuringPlanner = false;
   const currentArtifact = join(root, ".factory", "architecture", `${run.id}.html`);
   try {
     if (agent.name === "planner" && (await lstat(currentArtifact).catch(() => undefined)))
@@ -452,6 +468,14 @@ async function completeWorkflow(args: {
       model: agent.model,
       tools: agent.allowedTools,
     };
+    let watching = true;
+    const watcher = (async () => {
+      while (watching) {
+        if (JSON.stringify(await factoryState(root)) !== JSON.stringify(initialFactoryState))
+          factoryChangedDuringPlanner = true;
+        await Bun.sleep(25);
+      }
+    })();
     const outcome = await completeAgent(
       { start: () => processRun } as any,
       invocation,
@@ -472,6 +496,8 @@ async function completeWorkflow(args: {
         });
       },
     );
+    watching = false;
+    await watcher;
     let result =
       "result" in outcome
         ? outcome.result
@@ -484,11 +510,21 @@ async function completeWorkflow(args: {
             artifacts: [],
             notes: [],
           };
+    if (agent.name === "planner") {
+      plannerPostState = await factoryState(root);
+      const barrier = process.env.FACTORY_TEST_PLANNER_POST_STATE_BARRIER;
+      if (barrier) {
+        await Bun.write(barrier, "captured\n");
+        while ((await Bun.file(`${barrier}.release`).exists()) === false) await Bun.sleep(10);
+      }
+    }
     if (
       agent.name === "planner" &&
-      JSON.stringify(await factoryState(root)) !== JSON.stringify(initialFactoryState)
+      JSON.stringify(plannerPostState) !== JSON.stringify(initialFactoryState)
     ) {
-      await restoreFactoryState(root, initialFactoryState);
+      if (factoryChangedDuringPlanner) throw new FactoryStateConcurrencyConflict();
+      plannerStateRestoreAttempted = true;
+      await restoreFactoryState(root, initialFactoryState, plannerPostState);
       throw Error("Planner may not mutate Factory plan or mission state");
     }
     if (agent.name === "planner" && outcome.kind === "success") {
@@ -524,6 +560,13 @@ async function completeWorkflow(args: {
           { path: artifactPath, label: declarations[0].description },
         ],
       };
+      const draftBarrier = process.env.FACTORY_TEST_PLANNER_BEFORE_DRAFT_BARRIER;
+      if (draftBarrier) {
+        await Bun.write(draftBarrier, "ready\n");
+        while ((await Bun.file(`${draftBarrier}.release`).exists()) === false) await Bun.sleep(10);
+      }
+      if (JSON.stringify(await factoryState(root)) !== JSON.stringify(initialFactoryState))
+        throw new FactoryStateConcurrencyConflict();
       let plan;
       plan = await createDraftPlan(planInput, join(root, ".factory", "plans.jsonl"), root);
       draftPersisted = true;
@@ -577,11 +620,19 @@ async function completeWorkflow(args: {
       failure,
     );
   } catch (error) {
+    let failure = errorMessage(error);
     if (agent.name === "planner") {
-      await restoreFactoryState(root, initialFactoryState).catch(() => undefined);
+      try {
+        if (plannerPostState && !plannerStateRestoreAttempted) {
+          plannerStateRestoreAttempted = true;
+          await restoreFactoryState(root, initialFactoryState, plannerPostState);
+        }
+      } catch (restoreError) {
+        failure = `${failure}; Factory state restoration failed: ${errorMessage(restoreError)}`;
+      }
       await rm(currentArtifact, { force: true }).catch(() => undefined);
     } else if (!draftPersisted) await rm(currentArtifact, { force: true }).catch(() => undefined);
-    return terminalFailure(storage, run, error);
+    return terminalFailure(storage, run, Error(failure));
   } finally {
     try {
       storage.clearAgentProcess(run.id);

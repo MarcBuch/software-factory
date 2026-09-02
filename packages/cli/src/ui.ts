@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
 import { loadPlans } from "./plans";
+import { recoverFactoryTransaction, withFactoryLock } from "./storage";
 import {
   startWorkflow,
   validateWorkflowInput,
@@ -85,10 +86,10 @@ export async function startUiServer(options: UiServerOptions) {
         const path = url.pathname;
         if (path === "/api/health") return json({ ok: true });
         if (request.method === "GET" && path === "/api/plans") {
-          const plans = await loadPlans(
-            join(options.repositoryRoot, ".factory", "plans.jsonl"),
-            [],
-          );
+          const plans = await withFactoryLock(options.repositoryRoot, async () => {
+            await recoverFactoryTransaction(options.repositoryRoot);
+            return loadPlans(join(options.repositoryRoot, ".factory", "plans.jsonl"), []);
+          });
           const latest = new Map<string, (typeof plans)[number]>();
           for (const plan of plans) {
             const current = latest.get(plan.id);

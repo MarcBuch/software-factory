@@ -56,7 +56,7 @@ export async function createDraftPlan(
   file: string,
   repositoryRoot?: string,
 ): Promise<Plan> {
-  return withFactoryLock(async () => {
+  return withFactoryLock(repositoryRoot ?? (await projectRoot()), async () => {
     const plans = await loadPlans(file, []);
     const now = new Date().toISOString();
     const plan = PlanSchema.parse({
@@ -116,6 +116,19 @@ export function validatePlansAgainstMissions(plans: Plan[], _missions: MissionRe
       throw Error(`Only latest revision may be approved for ${id}`);
   }
   return plans;
+}
+
+/** Remove a plan and every mission materialized from any of its revisions. */
+export function deletePlanCascade<T extends { sourcePlan?: { planId: string } }>(
+  plans: Plan[],
+  missions: T[],
+  planId: string,
+): { plans: Plan[]; missions: T[] } {
+  if (!plans.some((plan) => plan.id === planId)) throw Error(`Plan not found: ${planId}`);
+  return {
+    plans: plans.filter((plan) => plan.id !== planId),
+    missions: missions.filter((mission) => mission.sourcePlan?.planId !== planId),
+  };
 }
 
 export const PlansMetadataSchema = z
@@ -189,7 +202,7 @@ export async function savePlansUnlocked(plans: Plan[], file: string) {
 
 export async function savePlans(plans: Plan[], missions: MissionReference[], file?: string) {
   file ??= await plansPath();
-  return withFactoryLock(() => {
+  return withFactoryLock(await projectRoot(), () => {
     validatePlansAgainstMissions(plans, missions);
     return savePlansUnlocked(plans, file!);
   });
@@ -197,7 +210,7 @@ export async function savePlans(plans: Plan[], missions: MissionReference[], fil
 
 export async function ensurePlansMetadata() {
   const file = await plansPath();
-  await withFactoryLock(() => ensurePlansMetadataUnlocked(file));
+  await withFactoryLock(await projectRoot(), () => ensurePlansMetadataUnlocked(file));
 }
 
 export async function ensurePlansMetadataUnlocked(file: string) {
@@ -206,7 +219,7 @@ export async function ensurePlansMetadataUnlocked(file: string) {
 
 export async function appendPlan(plan: Plan, missions: MissionReference[], file?: string) {
   file ??= await plansPath();
-  return withFactoryLock(async () => {
+  return withFactoryLock(await projectRoot(), async () => {
     const plans = await loadPlans(file, missions);
     plans.push(PlanSchema.parse(plan));
     validatePlansAgainstMissions(plans, missions);
