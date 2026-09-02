@@ -290,8 +290,17 @@ export const LaunchResponseSchema = z
   .object({ accepted: z.literal(true), run: RunSchema })
   .strict();
 export const DeleteResponseSchema = z.object({ deleted: z.literal(true), runId: text }).strict();
+export const DeletePlanResponseSchema = z
+  .object({
+    deleted: z.literal(true),
+    planId: planId,
+    revisionsDeleted: z.number().int().nonnegative(),
+    missionsDeleted: z.number().int().nonnegative(),
+  })
+  .strict();
 
 export type Run = z.infer<typeof RunSchema>;
+export type DeletePlanResponse = z.infer<typeof DeletePlanResponseSchema>;
 export type RunFailure = z.infer<typeof RunFailureSchema>;
 export type TokenUsage = z.infer<typeof TokenUsageSchema>;
 export type Cost = z.infer<typeof CostSchema>;

@@ -1,4 +1,18 @@
+import { Trash2 } from "lucide-react";
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { Plan } from "@/data/plans";
 
@@ -9,7 +23,17 @@ const date = (value: string) =>
 const statusVariant = (status: Plan["status"]) =>
   status === "approved" ? "default" : status === "draft" ? "secondary" : "outline";
 
-export function PlanDetail({ plan }: { plan: Plan }) {
+export function PlanDetail({
+  plan,
+  deleting,
+  error,
+  onDelete,
+}: {
+  plan: Plan;
+  deleting: boolean;
+  error?: string;
+  onDelete: () => void;
+}) {
   return (
     <section aria-labelledby="detail-heading">
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -19,8 +43,37 @@ export function PlanDetail({ plan }: { plan: Plan }) {
             {plan.missionTitle}
           </h2>
         </div>
-        <Badge variant={statusVariant(plan.status)}>{plan.status}</Badge>
+        <div className="flex items-center gap-3">
+          <Badge variant={statusVariant(plan.status)}>{plan.status}</Badge>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive" disabled={deleting}>
+                <Trash2 /> Delete plan
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete this plan?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  All revisions and linked missions are permanently removed. This action cannot be
+                  undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+                <AlertDialogAction variant="destructive" disabled={deleting} onClick={onDelete}>
+                  <Trash2 /> {deleting ? "Deleting…" : "Delete plan"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       </div>
+      {error ? (
+        <p role="alert" className="mb-4 text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
       <Card>
         <CardContent className="space-y-8 pt-6">
           <div className="grid gap-4 border-b pb-6 text-sm sm:grid-cols-4">

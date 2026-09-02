@@ -3,12 +3,13 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PlanDetail } from "@/components/plans/plan-detail";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { planQuery } from "@/data/queries";
+import { planQuery, useDeletePlan } from "@/data/queries";
 
 function PlanRoute() {
   const { planId } = Route.useParams();
   const navigate = useNavigate();
   const query = planQuery();
+  const remove = useDeletePlan();
   const back = () => void navigate({ to: "/workspace", replace: true });
   if (query.isPending)
     return (
@@ -42,7 +43,16 @@ function PlanRoute() {
       <Button variant="outline" onClick={back}>
         Back to workspace
       </Button>
-      <PlanDetail plan={plan} />
+      <PlanDetail
+        plan={plan}
+        deleting={remove.isPending}
+        error={remove.error?.message}
+        onDelete={() =>
+          remove.mutate(plan.id, {
+            onSuccess: () => void navigate({ to: "/workspace", replace: true }),
+          })
+        }
+      />
     </div>
   );
 }

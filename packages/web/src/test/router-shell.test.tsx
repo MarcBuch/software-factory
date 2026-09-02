@@ -113,6 +113,15 @@ function setup(initialEntry = "/runs") {
     (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (init?.method === "POST") return Promise.resolve(jsonResponse({ accepted: true, run }));
+      if (init?.method === "DELETE" && path.includes("/api/plans/"))
+        return Promise.resolve(
+          jsonResponse({
+            deleted: true,
+            planId: "pln_one",
+            revisionsDeleted: 1,
+            missionsDeleted: 2,
+          }),
+        );
       if (init?.method === "DELETE")
         return Promise.resolve(jsonResponse({ deleted: true, runId: "run-1" }));
       if (path.includes("/trace"))
@@ -224,7 +233,7 @@ describe("router shell", () => {
       screen
         .getAllByRole("row")
         .slice(1)
-        .map((row) => within(row).getByRole("cell").textContent),
+        .map((row) => within(row).getAllByRole("cell")[0]!.textContent),
     ).toEqual([
       expect.stringContaining("Third plan"),
       expect.stringContaining("Second plan"),
@@ -279,6 +288,47 @@ describe("router shell", () => {
       await screen.findByRole("heading", { name: mockPlans[1].missionTitle }),
     ).toBeInTheDocument();
     expect(screen.getByText(mockPlans[1].intent)).toBeInTheDocument();
+  });
+
+  test("confirms and deletes a plan before replacing the detail route", async () => {
+    const { router, fetchMock, queryClient } = setup("/workspace/pln_one");
+    let deleted = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (init?.method === "DELETE") {
+        deleted = true;
+        return Promise.resolve(
+          jsonResponse({
+            deleted: true,
+            planId: "pln_one",
+            revisionsDeleted: 1,
+            missionsDeleted: 2,
+          }),
+        );
+      }
+      if (path.endsWith("/api/plans"))
+        return Promise.resolve(jsonResponse(deleted ? mockPlans.slice(1) : mockPlans));
+      return Promise.resolve(jsonResponse({ runs: [run] }));
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    await screen.findByRole("heading", { name: mockPlans[0].missionTitle });
+    fireEvent.click(screen.getByRole("button", { name: "Delete plan" }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(
+      "All revisions and linked missions are permanently removed.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete plan" }));
+
+    await waitFor(() => expect(router.history.location.pathname).toBe("/workspace"));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/plans/pln_one",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(queryClient.getQueryData<typeof mockPlans>(["plans"])).not.toContainEqual(mockPlans[0]);
   });
 
   test("announces a pending plan detail without an aria-busy ancestor", async () => {

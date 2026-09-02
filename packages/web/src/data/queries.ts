@@ -2,8 +2,10 @@ import {
   LaunchRequestSchema,
   LaunchResponseSchema,
   DeleteResponseSchema,
+  DeletePlanResponseSchema,
   SessionsPageSchema,
   TracePageSchema,
+  type Plan,
   type Run,
   type TraceEventApi,
   type TraceSummary,
@@ -36,6 +38,20 @@ export const planQuery = () =>
     queryKey: ["plans"],
     queryFn: async () => mapPlansResponse(await api<unknown>("/api/plans")),
   });
+
+export function useDeletePlan() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiSchema(`/api/plans/${encodeURIComponent(id)}`, DeletePlanResponseSchema, {
+        method: "DELETE",
+      }),
+    onSuccess: (_, id) => {
+      client.setQueryData<Plan[]>(["plans"], (plans) => plans?.filter((plan) => plan.id !== id));
+      void client.invalidateQueries({ queryKey: ["plans"] });
+    },
+  });
+}
 export const sessionQueryKey = ["sessions"] as const;
 
 function updateSessions(client: ReturnType<typeof useQueryClient>, run: Run) {

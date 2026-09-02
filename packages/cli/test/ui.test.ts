@@ -52,6 +52,29 @@ test("UI session delete API removes terminal sessions and rejects missing or act
   }
 });
 
+test("UI plan delete API uses the atomic plan cascade and reports counts", async () => {
+  const root = await repo();
+  const planFile = join(root, ".factory", "plans.jsonl");
+  const plan = await createDraftPlan(PLAN_INPUT_EXAMPLE, planFile, root);
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL(`/api/plans/${plan.id}`, ui.url), { method: "DELETE" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      deleted: true,
+      planId: plan.id,
+      revisionsDeleted: 1,
+      missionsDeleted: 0,
+    });
+
+    const missing = await fetch(new URL(`/api/plans/${plan.id}`, ui.url), { method: "DELETE" });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: `Plan not found: ${plan.id}` });
+  } finally {
+    ui.close();
+  }
+});
+
 test("UI session launch API validates input and returns accepted runs", async () => {
   const root = await repo();
   const launches: Array<{ request: string; agentName: string }> = [];

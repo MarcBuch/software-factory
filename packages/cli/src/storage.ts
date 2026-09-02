@@ -150,6 +150,11 @@ export async function withFactoryLock<T>(repositoryRoot: string, fn: () => Promi
       break;
     } catch (e: any) {
       if (e?.code !== "EEXIST") throw e;
+      const contentionDir = process.env.FACTORY_TEST_LOCK_CONTENTION_READY_DIR;
+      if (contentionDir) {
+        await mkdir(contentionDir, { recursive: true });
+        await writeFile(join(contentionDir, String(process.pid)), "waiting\n");
+      }
       try {
         const s = await stat(file),
           o = await owner(file);

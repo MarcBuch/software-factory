@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
+  DeletePlanResponseSchema,
   MissionSchema,
   TaskSchema,
   TaskTypeSchema,
@@ -14,10 +15,11 @@ import {
 import { Command } from "commander";
 import { z } from "zod";
 
+import { validateMissions } from "./mission-validation";
 import { ensurePlansMetadataUnlocked } from "./plans";
 import {
   createDraftPlan,
-  deletePlanCascade,
+  deletePlanCascadeAtomic,
   loadPlanRecords,
   loadPlans,
   PlanSchema,
@@ -31,7 +33,7 @@ import {
   type MissionReference,
 } from "./plans";
 import { lookupRoster } from "./roster";
-import { recoverFactoryTransaction, replaceFactoryPair, withFactoryLock } from "./storage";
+import { recoverFactoryTransaction, withFactoryLock } from "./storage";
 import { startUiServer } from "./ui";
 import { startWorkflow } from "./workflow-service";
 import { openWorkflowStorage } from "./workflow-storage";
@@ -126,37 +128,7 @@ async function installMissionSkills(root: string) {
   }
 }
 function validateAll(missions: MissionType[]) {
-  const ids = new Set<string>(),
-    sources = new Set<string>();
-  for (const m of missions) {
-    for (const x of [m, ...m.milestones, ...m.milestones.flatMap((v) => v.tasks)]) {
-      if (ids.has(x.id)) throw Error(`Duplicate ID: ${x.id}`);
-      ids.add(x.id);
-    }
-    if (m.sourcePlan) {
-      const key = `${m.sourcePlan.planId}:${m.sourcePlan.revision}`;
-      if (sources.has(key)) throw Error(`Duplicate source plan: ${key}`);
-      sources.add(key);
-    }
-    const tasks = new Map(m.milestones.flatMap((ms) => ms.tasks).map((t) => [t.id, t]));
-    const visiting = new Set<string>(),
-      visited = new Set<string>();
-    const visit = (id: string) => {
-      if (visiting.has(id)) throw Error(`Cyclic task dependency: ${id}`);
-      if (visited.has(id)) return;
-      const task = tasks.get(id);
-      if (!task) return;
-      visiting.add(id);
-      for (const dep of task.dependsOn ?? []) {
-        if (!tasks.has(dep)) throw Error(`Unknown task dependency: ${dep}`);
-        visit(dep);
-      }
-      visiting.delete(id);
-      visited.add(id);
-    };
-    for (const id of tasks.keys()) visit(id);
-  }
-  return missions;
+  return validateMissions(missions);
 }
 function locateTask(missions: MissionType[], id: string) {
   for (const mission of missions)
@@ -222,28 +194,6 @@ async function save(missions: MissionType[]) {
   } finally {
     await rm(tmp, { force: true });
   }
-}
-async function savePlanCascade(plans: Plan[], missions: MissionType[], planFile: string) {
-  const p = await paths();
-  validatePlansAgainstMissions(plans, []);
-  validateAll(missions);
-  const planData =
-      [
-        JSON.stringify({ type: "plans-metadata", schemaVersion: 1 }),
-        ...plans.map((plan) => JSON.stringify(plan)),
-      ].join("\n") + "\n",
-    missionData =
-      [
-        JSON.stringify({ type: "metadata", schemaVersion: 1 }),
-        ...missions.map((mission) => JSON.stringify(mission)),
-      ].join("\n") + "\n",
-    originalPlans = (await Bun.file(planFile).exists())
-      ? await Bun.file(planFile).text()
-      : undefined,
-    originalMissions = (await Bun.file(p.file).exists())
-      ? await Bun.file(p.file).text()
-      : undefined;
-  await replaceFactoryPair(p.root, planData, missionData, originalPlans, originalMissions);
 }
 function isJson(cmd: Command) {
   return cmd.optsWithGlobals().json === true;
@@ -925,17 +875,24 @@ pl.action(async (_, cmd) => {
   });
 });
 const pd = jsonOption(plan.command("delete")).argument("<plan-id>");
-pd.action(async (id, _, cmd) =>
-  withLock(async () => {
-    const { p } = await planContext();
-    const planFile = join(p.dir, "plans.jsonl"),
-      plans = await loadPlans(planFile, []),
-      missions = await load(p.file),
-      result = deletePlanCascade(plans, missions, id);
-    await savePlanCascade(result.plans, result.missions, planFile);
-    output({ deleted: true, planId: id }, isJson(cmd));
-  }),
-);
+pd.action(async (id, _, cmd) => {
+  const { p } = await planContext();
+  const result = await deletePlanCascadeAtomic({
+    repositoryRoot: p.root,
+    planFile: join(p.dir, "plans.jsonl"),
+    missionFile: p.file,
+    planId: id,
+  });
+  output(
+    DeletePlanResponseSchema.parse({
+      deleted: true,
+      planId: id,
+      revisionsDeleted: result.revisionsDeleted,
+      missionsDeleted: result.missionsDeleted,
+    }),
+    isJson(cmd),
+  );
+});
 const ps = jsonOption(plan.command("show")).argument("<plan-id>").option("--revision <revision>");
 ps.action(async (id, opts, cmd) => {
   await withStoreRead(async () => {

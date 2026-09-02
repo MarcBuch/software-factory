@@ -2,7 +2,9 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
-import { loadPlans } from "./plans";
+import { DeletePlanResponseSchema } from "@software-factory/contracts";
+
+import { deletePlanCascadeAtomic, loadPlans } from "./plans";
 import { recoverFactoryTransaction, withFactoryLock } from "./storage";
 import {
   startWorkflow,
@@ -96,6 +98,29 @@ export async function startUiServer(options: UiServerOptions) {
             if (!current || plan.revision > current.revision) latest.set(plan.id, plan);
           }
           return json([...latest.values()]);
+        }
+        const deletePlanMatch = path.match(/^\/api\/plans\/([^/]+)$/);
+        if (request.method === "DELETE" && deletePlanMatch) {
+          const planId = decodeURIComponent(deletePlanMatch[1]!);
+          try {
+            const result = await deletePlanCascadeAtomic({
+              repositoryRoot: options.repositoryRoot,
+              planFile: join(options.repositoryRoot, ".factory", "plans.jsonl"),
+              missionFile: join(options.repositoryRoot, ".factory", "missions.jsonl"),
+              planId,
+            });
+            return json(
+              DeletePlanResponseSchema.parse({
+                deleted: true,
+                planId,
+                revisionsDeleted: result.revisionsDeleted,
+                missionsDeleted: result.missionsDeleted,
+              }),
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return json({ error: message }, /not found/i.test(message) ? 404 : 500);
+          }
         }
         if (path === "/api/sessions" && request.method === "POST") {
           let input: ReturnType<typeof validateWorkflowInput>;

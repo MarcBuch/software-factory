@@ -12,10 +12,13 @@ import {
   RiskSchema,
   type Plan,
   type PlanInput,
+  MissionSchema,
+  type Mission,
 } from "@software-factory/contracts";
 import { z } from "zod";
 
-import { withFactoryLock } from "./storage";
+import { validateMissions } from "./mission-validation";
+import { replaceFactoryPair, withFactoryLock } from "./storage";
 const exec = promisify(execFile);
 
 export { AlternativeSchema, PlanInputSchema, PlanSchema, PlanStatus, RiskSchema };
@@ -128,6 +131,108 @@ export function deletePlanCascade<T extends { sourcePlan?: { planId: string } }>
   return {
     plans: plans.filter((plan) => plan.id !== planId),
     missions: missions.filter((mission) => mission.sourcePlan?.planId !== planId),
+  };
+}
+
+export type DeletePlanOptions = {
+  /** Canonical repository root used for locking, recovery, and the transaction journal. */
+  repositoryRoot: string;
+  planFile: string;
+  missionFile: string;
+  planId: string;
+};
+
+/**
+ * Delete a plan and its complete materialized-data cascade as one locked operation.
+ *
+ * The existence check happens before any write, while `withFactoryLock` recovers a
+ * previously interrupted transaction before reading. External plan artifacts are
+ * intentionally not touched: they are repository files, not plan-store records.
+ */
+export async function deletePlanCascadeAtomic({
+  repositoryRoot,
+  planFile,
+  missionFile,
+  planId,
+}: DeletePlanOptions): Promise<{
+  plans: Plan[];
+  missions: Mission[];
+  revisionsDeleted: number;
+  missionsDeleted: number;
+}> {
+  return withFactoryLock(repositoryRoot, async () => {
+    const plans = await loadPlans(planFile, []);
+    const missions = await loadMissionsForDeletion(missionFile);
+    const result = deletePlanCascade(plans, missions, planId);
+    validateMissions(result.missions);
+    const planData = serializePlans(result.plans);
+    const missionData = serializeMissions(result.missions);
+    const originalPlans = (await Bun.file(planFile).exists())
+      ? await Bun.file(planFile).text()
+      : undefined;
+    const originalMissions = (await Bun.file(missionFile).exists())
+      ? await Bun.file(missionFile).text()
+      : undefined;
+    await replaceFactoryPair(
+      repositoryRoot,
+      planData,
+      missionData,
+      originalPlans,
+      originalMissions,
+    );
+    return {
+      ...result,
+      revisionsDeleted: plans.length - result.plans.length,
+      missionsDeleted: missions.length - result.missions.length,
+    };
+  });
+}
+
+function serializePlans(plans: Plan[]) {
+  return (
+    [
+      JSON.stringify({ type: "plans-metadata", schemaVersion: 1 }),
+      ...plans.map((plan) => JSON.stringify(PlanSchema.parse(plan))),
+    ].join("\n") + "\n"
+  );
+}
+
+function serializeMissions(missions: Mission[]) {
+  return (
+    [
+      JSON.stringify({ type: "metadata", schemaVersion: 1 }),
+      ...missions.map((mission) => JSON.stringify(MissionSchema.parse(mission))),
+    ].join("\n") + "\n"
+  );
+}
+
+async function loadMissionsForDeletion(file: string): Promise<Mission[]> {
+  if (!existsSync(file)) return [];
+  const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
+  if (!lines.length) throw Error("Invalid storage: missing metadata");
+  const metadata = JSON.parse(lines[0]!);
+  if (metadata?.type !== "metadata" || metadata?.schemaVersion !== 1)
+    throw Error("Invalid storage metadata");
+  return lines
+    .slice(1)
+    .map((line) => MissionSchema.parse(normalizeMissionForDeletion(JSON.parse(line))));
+}
+
+function normalizeMissionForDeletion(value: unknown) {
+  if (!value || typeof value !== "object") return value;
+  const mission = value as Record<string, any>;
+  return {
+    verificationStrategy: mission.verificationStrategy ?? "Verify mission tasks",
+    risks: mission.risks ?? [],
+    ...mission,
+    milestones: (mission.milestones ?? []).map((milestone: any) => ({
+      ...milestone,
+      tasks: (milestone.tasks ?? []).map((task: any) => ({
+        status: task.status ?? "open",
+        ...task,
+        dependsOn: task.dependsOn ?? [],
+      })),
+    })),
   };
 }
 

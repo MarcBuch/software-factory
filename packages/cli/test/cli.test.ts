@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile, type ExecFileException } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -216,11 +216,87 @@ describe("standalone plans", () => {
     await run(d, "plan", "approve", unrelated.id, "--json");
     const deleted = await run(d, "plan", "delete", target.id, "--json");
     expect(deleted.exitCode).toBe(0);
+    expect(JSON.parse(deleted.stdout)).toEqual({
+      deleted: true,
+      planId: target.id,
+      revisionsDeleted: 2,
+      missionsDeleted: 2,
+    });
     expect((await readFile(planFile, "utf8")).split("\n").filter(Boolean)).toHaveLength(2);
     expect((await run(d, "plan", "list", "--json")).stdout).not.toContain(target.id);
     expect((await run(d, "plan", "list", "--json")).stdout).toContain(unrelated.id);
     expect((await run(d, "mission", "list", "--json")).stdout).not.toContain(target.id);
     expect((await run(d, "mission", "list", "--json")).stdout).toContain("mis_");
+  });
+
+  test("concurrent plan deletes serialize and preserve external artifacts", async () => {
+    const d = await repo();
+    const input = await planInput(d);
+    const artifact = join(d, "plan-notes.md");
+    await writeFile(artifact, "keep this repository file\n");
+    const planInputValue = JSON.parse(await readFile(input, "utf8"));
+    planInputValue.externalArtifacts = [{ path: "plan-notes.md", label: "Notes" }];
+    await writeFile(input, JSON.stringify(planInputValue));
+    const target = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout);
+    const unrelated = JSON.parse(
+      (await run(d, "plan", "create", "--input", await planInput(d), "--json")).stdout,
+    );
+    await run(d, "plan", "approve", target.id, "--json");
+    expect((await materialize(d, target.id)).exitCode).toBe(0);
+
+    const lock = join(d, ".factory/factory.lock");
+    const contentionDir = await mkdtemp(join(tmpdir(), "factory-lock-ready-"));
+    await writeFile(lock, JSON.stringify({ pid: process.pid, token: "test-lock" }));
+    const startDelete = () => {
+      let child!: ReturnType<typeof execFile>;
+      const result = new Promise<{ stdout: string; stderr: string; exitCode: number }>(
+        (resolve) => {
+          child = execFile(
+            "bun",
+            [cli, "plan", "delete", target.id, "--json"],
+            {
+              cwd: d,
+              encoding: "utf8",
+              env: { ...process.env, FACTORY_TEST_LOCK_CONTENTION_READY_DIR: contentionDir },
+            },
+            (error, stdout, stderr) =>
+              resolve({
+                stdout,
+                stderr,
+                exitCode: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+              }),
+          );
+        },
+      );
+      return { child, result };
+    };
+    const first = startDelete();
+    const second = startDelete();
+    let released = false;
+    let results: Awaited<typeof first.result>[] = [];
+    try {
+      while ((await readdir(contentionDir)).length < 2)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      expect((await readdir(contentionDir)).length).toBe(2);
+      expect(await Bun.file(lock).exists()).toBe(true);
+      await rm(lock);
+      released = true;
+      results = await Promise.all([first.result, second.result]);
+    } finally {
+      await rm(lock, { force: true });
+      if (!released) {
+        first.child.kill();
+        second.child.kill();
+      }
+      await Promise.allSettled([first.result, second.result]);
+      await rm(contentionDir, { recursive: true, force: true });
+    }
+    expect(results.filter((result) => result.exitCode === 0)).toHaveLength(1);
+    expect(results.filter((result) => result.exitCode !== 0)).toHaveLength(1);
+    expect((await run(d, "plan", "list", "--json")).stdout).not.toContain(target.id);
+    expect((await run(d, "plan", "list", "--json")).stdout).toContain(unrelated.id);
+    expect((await run(d, "mission", "list", "--json")).stdout).not.toContain(target.id);
+    expect(await readFile(artifact, "utf8")).toBe("keep this repository file\n");
   });
 
   test("missing and failed plan deletes preserve both stores", async () => {
@@ -246,6 +322,23 @@ describe("standalone plans", () => {
       ),
     );
     expect(failed.exitCode).not.toBe(0);
+    expect(await readFile(planFile)).toEqual(beforePlans);
+    expect(await readFile(missionFile)).toEqual(beforeMissions);
+  });
+
+  test("invalid remaining mission relationships abort deletion atomically", async () => {
+    const d = await repo(),
+      input = await planInput(d),
+      plan = JSON.parse((await run(d, "plan", "create", "--input", input, "--json")).stdout),
+      planFile = join(d, ".factory/plans.jsonl"),
+      missionFile = join(d, ".factory/missions.jsonl");
+    expect((await run(d, "mission", "create", "--title", "Unrelated", "--json")).exitCode).toBe(0);
+    const missionLines = (await readFile(missionFile, "utf8")).trim().split("\n");
+    await writeFile(missionFile, `${missionLines.join("\n")}\n${missionLines[1]}\n`);
+    const beforePlans = await readFile(planFile),
+      beforeMissions = await readFile(missionFile),
+      deleted = await run(d, "plan", "delete", plan.id, "--json");
+    expect(deleted.exitCode).not.toBe(0);
     expect(await readFile(planFile)).toEqual(beforePlans);
     expect(await readFile(missionFile)).toEqual(beforeMissions);
   });
