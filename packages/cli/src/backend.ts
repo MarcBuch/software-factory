@@ -1,5 +1,20 @@
+import { realpath } from "node:fs/promises";
+import { join } from "node:path";
+
+import type { OpenCodeClient, OpenCodeEvent, SessionMessageAssistant } from "@opencode-ai/client";
 import { TraceEventSchema, type TraceEvent } from "@software-factory/contracts";
 
+import {
+  defaultLifecycleDiagnostic,
+  errorDetails,
+  type LifecycleDiagnosticSink,
+} from "./lifecycle-diagnostics";
+import type {
+  UiHostEvent,
+  UiHostManager,
+  UiHostManagerBackendFailureError,
+} from "./ui-host-manager";
+import { UiHostManagerEventQueueOverflowError } from "./ui-host-manager";
 import type { AgentRosterEntry } from "./workflow";
 
 /** The deliberately small contract implemented by all workflow backends. */
@@ -29,6 +44,8 @@ export type BackendExit = Readonly<{
 }>;
 
 export interface BackendProcess extends AsyncIterable<BackendEvent> {
+  /** Identifies whether this execution owns an OS child process or a service session. */
+  readonly executionKind?: "subprocess" | "service" | "embedded";
   readonly pid: number;
   readonly command: readonly string[];
   readonly exit: Promise<BackendExit>;
@@ -38,6 +55,8 @@ export interface BackendProcess extends AsyncIterable<BackendEvent> {
 }
 
 export interface BackendAdapter {
+  /** Service SDK sessions can execute concurrently on one shared host. */
+  readonly supportsConcurrent?: boolean;
   start(invocation: BackendInvocation): BackendProcess;
 }
 
@@ -69,6 +88,7 @@ function sessionOf(value: unknown): string | undefined {
     if (typeof object[key] === "string" && object[key]) return object[key];
   }
   if (object.session && typeof object.session === "object") return sessionOf(object.session);
+  if (object.data && typeof object.data === "object") return sessionOf(object.data);
   return undefined;
 }
 
@@ -156,6 +176,152 @@ function normalized(runId: string, value: unknown): TraceEvent | undefined {
   const cost = event.cost ?? event.part?.cost;
   if (typeof cost === "number" && Number.isFinite(cost))
     candidate.cost = { amount: cost, currency: "USD" };
+  return TraceEventSchema.safeParse(candidate).success ? (candidate as TraceEvent) : undefined;
+}
+
+/** Projects the generated V2 event envelope without widening unknown payloads. */
+type V2ToolNames = Map<string, string>;
+
+function updateV2ToolNames(event: Record<string, unknown>, names: V2ToolNames) {
+  if (event.type !== "session.message.content.updated") return;
+  const data = event.data;
+  if (!data || typeof data !== "object") return;
+  const content = (data as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return;
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const part = item as Record<string, unknown>;
+    if (part.type === "tool" && typeof part.id === "string" && typeof part.name === "string")
+      names.set(part.id, part.name);
+  }
+}
+
+export function normalizedV2(
+  runId: string,
+  value: OpenCodeEvent,
+  toolNames: V2ToolNames = new Map(),
+): TraceEvent | undefined {
+  const event = value as unknown as Record<string, unknown>;
+  const data =
+    event.data && typeof event.data === "object"
+      ? (event.data as Record<string, unknown>)
+      : undefined;
+  if (!data || typeof event.type !== "string") return undefined;
+  const created = event.created;
+  const at =
+    typeof created === "number" && Number.isFinite(created)
+      ? new Date(created).toISOString()
+      : isoNow();
+  const base = { runId, at };
+  const agentName = "opencode";
+  const spanId = typeof data.id === "string" ? data.id : undefined;
+  updateV2ToolNames(event, toolNames);
+  const tool =
+    spanId && typeof data.name === "string"
+      ? data.name
+      : spanId
+        ? (toolNames.get(spanId) ?? "tool")
+        : "tool";
+  let candidate: Record<string, unknown> | undefined;
+  switch (event.type) {
+    case "session.message.content.updated":
+      return undefined;
+    case "session.tool.called":
+      candidate = {
+        ...base,
+        type: "tool_call",
+        agentName,
+        tool,
+        input: data.input,
+        ...(spanId ? { spanId } : {}),
+        phase: "start",
+      };
+      break;
+    case "session.tool.success":
+      candidate = {
+        ...base,
+        type: "tool_call",
+        agentName,
+        tool,
+        ...(data.input !== undefined ? { input: data.input } : {}),
+        output: data.content,
+        ...(spanId ? { spanId } : {}),
+        phase: "finish",
+      };
+      break;
+    case "session.tool.failed":
+      candidate = {
+        ...base,
+        type: "tool_call",
+        agentName,
+        tool,
+        output: data.error,
+        ...(spanId ? { spanId } : {}),
+        phase: "finish",
+      };
+      break;
+    case "session.step.ended":
+      candidate = { ...base, type: "model_step", agentName };
+      break;
+    case "session.step.failed": {
+      const error = data.error;
+      const detail =
+        error && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+      candidate = {
+        ...base,
+        type: "error",
+        agentName,
+        message: typeof detail?.message === "string" ? detail.message : "Step failed",
+        ...(typeof detail?.type === "string" ? { code: detail.type } : {}),
+      };
+      break;
+    }
+    case "session.execution.failed": {
+      const error = data.error;
+      const detail =
+        error && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+      candidate = {
+        ...base,
+        type: "error",
+        agentName,
+        message: typeof detail?.message === "string" ? detail.message : "Session execution failed",
+        ...(typeof detail?.type === "string" ? { code: detail.type } : {}),
+      };
+      break;
+    }
+    case "session.execution.interrupted":
+      candidate = {
+        ...base,
+        type: "error",
+        agentName,
+        message: "Session execution interrupted",
+        code: "interrupted",
+      };
+      break;
+    default:
+      return undefined;
+  }
+  if (!candidate) return undefined;
+  const tokens = data.tokens;
+  if (tokens && typeof tokens === "object") {
+    const t = tokens as Record<string, unknown>;
+    const cache =
+      t.cache && typeof t.cache === "object" ? (t.cache as Record<string, unknown>) : {};
+    const numbers = [t.input, t.output, t.reasoning, cache.read, cache.write];
+    if (numbers.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0)) {
+      const [input, output, reasoning, cacheRead, cacheWrite] = numbers as number[];
+      candidate.usage = {
+        input,
+        output,
+        reasoning,
+        cacheRead,
+        cacheWrite,
+        total: input + output + reasoning + cacheRead + cacheWrite,
+      };
+    }
+  }
+  if (typeof data.cost === "number" && Number.isFinite(data.cost) && data.cost >= 0)
+    candidate.cost = { amount: data.cost, currency: "USD" };
   return TraceEventSchema.safeParse(candidate).success ? (candidate as TraceEvent) : undefined;
 }
 
@@ -336,5 +502,620 @@ export class OpenCodeAdapter implements BackendAdapter {
       ? this.options.spawn(command, { cwd: invocation.repositoryRoot, env })
       : Bun.spawn(command, { cwd: invocation.repositoryRoot, env, stdout: "pipe", stderr: "pipe" });
     return new OpenCodeProcess(invocation, this.options, command, child as Spawned);
+  }
+}
+
+/** The small subset of the V2 service client used to start a run. */
+export type V2Client = {
+  agent: Pick<OpenCodeClient["agent"], "list">;
+  config: Pick<OpenCodeClient["config"], "get">;
+  location: Pick<OpenCodeClient["location"], "get">;
+  debug?: {
+    location?: Pick<NonNullable<OpenCodeClient["debug"]>["location"], "evict">;
+  };
+  session: Pick<OpenCodeClient["session"], "create" | "prompt" | "wait" | "interrupt" | "active">;
+  message: Pick<OpenCodeClient["message"], "list">;
+};
+
+/** Verify a repository-local custom agent, refreshing only that location when needed. */
+export async function ensureV2AgentAvailable(
+  client: V2Client,
+  repositoryRoot: string,
+  opencodeAgent: string | undefined,
+  onDiagnostic?: LifecycleDiagnosticSink,
+) {
+  const diagnostic = onDiagnostic ?? (() => {});
+  const location = { directory: repositoryRoot };
+  const expected = await realpath(repositoryRoot);
+  const equivalent = async (value: unknown, target: string) => {
+    if (typeof value !== "string") return false;
+    try {
+      return (await realpath(value)) === target;
+    } catch {
+      return false;
+    }
+  };
+  const check = async () => {
+    diagnostic({ event: "agent_preflight", backend: "v2-client", state: "started" });
+    const resolved = await client.location.get({ location });
+    const agents = await client.agent.list({ location });
+    const configs = await client.config.get({ location });
+    const locationOk =
+      (await equivalent(resolved.directory, expected)) &&
+      (await equivalent(resolved.project?.directory, expected));
+    const configPath = join(expected, ".opencode");
+    const configOk = (configs ?? []).some((entry) => equivalent(entry.path, configPath));
+    const agentOk =
+      !opencodeAgent ||
+      agents.data.some((agent) => agent.id === opencodeAgent || agent.name === opencodeAgent);
+    const valid = locationOk && configOk && agentOk;
+    diagnostic({
+      event: "agent_preflight",
+      backend: "v2-client",
+      state: valid ? "succeeded" : "failed",
+    });
+    return valid;
+  };
+  // A shared service can retain a failed location load. Refresh only this repository;
+  // callers must check their workflow lock before invoking this operation.
+  if (await check()) return;
+  diagnostic({ event: "location_refresh", backend: "v2-client", state: "started" });
+  try {
+    await client.debug?.location?.evict({ location });
+    diagnostic({ event: "location_refresh", backend: "v2-client", state: "succeeded" });
+  } catch (error) {
+    diagnostic({
+      event: "location_refresh",
+      backend: "v2-client",
+      state: "failed",
+      ...errorDetails(error),
+    });
+    throw error;
+  }
+  if (!(await check())) {
+    const error = new Error("OpenCode location verification failed");
+    diagnostic({
+      event: "agent_preflight",
+      backend: "v2-client",
+      state: "failed",
+      ...errorDetails(error),
+    });
+    throw error;
+  }
+}
+
+type V2MessageList = NonNullable<V2Client["message"]>["list"];
+type V2Message = Awaited<ReturnType<V2MessageList>>["data"][number];
+
+function createV2SessionId() {
+  return `ses_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+/**
+ * The prompt endpoint returns an inbox user item, not the assistant message
+ * produced by that item. Take a complete, ascending message snapshot on both
+ * sides of the prompt and only reconcile assistant IDs that did not exist in
+ * the pre-prompt snapshot. `message.list` is cursor paginated, so never treat
+ * its first page as the complete history.
+ */
+async function allSessionMessages(
+  client: V2Client,
+  sessionID: string,
+  signal: AbortSignal,
+): Promise<V2Message[]> {
+  const list = client.message.list;
+  const messages: V2Message[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await list(
+      {
+        sessionID,
+        // The V2 API rejects combining a cursor with an order. Ordering the
+        // first page is sufficient: subsequent pages continue that order.
+        ...(cursor ? {} : { order: "asc" }),
+        ...(cursor ? { cursor } : {}),
+      },
+      { signal },
+    );
+    if (!page) break;
+    messages.push(...page.data);
+    cursor = page.cursor?.next ?? undefined;
+  } while (cursor);
+  return messages;
+}
+
+function newAssistantMessage(
+  before: readonly V2Message[],
+  after: readonly V2Message[],
+): SessionMessageAssistant | undefined {
+  const beforeIds = new Set(before.map((message) => message.id));
+  // The SDK contract guarantees ascending order when requested above. The
+  // timestamp comparison also makes this safe if a compatible host ignores
+  // the order parameter, without ever considering a pre-prompt message.
+  return after
+    .filter(
+      (message): message is SessionMessageAssistant =>
+        message.type === "assistant" && !beforeIds.has(message.id),
+    )
+    .reduce<SessionMessageAssistant | undefined>((latest, message) => {
+      if (!latest || message.time.created >= latest.time.created) return message;
+      return latest;
+    }, undefined);
+}
+
+export type V2OpenCodeOptions = Readonly<{
+  hostManager: Pick<UiHostManager, "registerEventConsumer" | "withHost">;
+  /** Optional client seam for deterministic tests. Production obtains this from the manager. */
+  client?: V2Client;
+  onDiagnostic?: LifecycleDiagnosticSink;
+}>;
+
+class V2OpenCodeProcess implements BackendProcess {
+  readonly executionKind = "service" as const;
+  readonly pid = 0;
+  readonly command: readonly string[] = [];
+  readonly exit: Promise<BackendExit>;
+  private readonly events: BackendEvent[] = [];
+  private readonly waiters: ((result: IteratorResult<BackendEvent>) => void)[] = [];
+  private closed = false;
+  private sessionId: string | undefined;
+  private readonly preSessionEvents: {
+    event: UiHostEvent;
+    sessionId?: string;
+  }[] = [];
+  private hostFailure: UiHostManagerBackendFailureError | undefined;
+  private subscription: { unsubscribe: () => void } | undefined;
+  private readonly abortController = new AbortController();
+  private readonly toolNames: V2ToolNames = new Map();
+  private canceled = false;
+  private interruptRequested = false;
+  private interruptPromise: Promise<void> | undefined;
+  private readonly createsSession: boolean;
+  private readonly onDiagnostic: LifecycleDiagnosticSink;
+
+  constructor(
+    private readonly invocation: BackendInvocation,
+    private readonly options: V2OpenCodeOptions,
+    sessionId?: string,
+  ) {
+    this.sessionId = sessionId;
+    this.createsSession = sessionId === undefined;
+    this.onDiagnostic = options.onDiagnostic ?? defaultLifecycleDiagnostic;
+    this.exit = this.run();
+  }
+
+  private push(event: BackendEvent) {
+    if (event.sessionId) this.sessionId = event.sessionId;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter({ value: event, done: false });
+    else this.events.push(event);
+  }
+
+  private async run(): Promise<BackendExit> {
+    try {
+      this.onDiagnostic({
+        event: "run",
+        backend: "v2-client",
+        runId: this.invocation.runId,
+        state: "started",
+      });
+      // This intentionally precedes both SDK calls: session.created and execution
+      // events can be emitted synchronously by an embedded host.
+      this.subscription = this.options.hostManager.registerEventConsumer({
+        location: { directory: this.invocation.repositoryRoot },
+        sessionId: this.sessionId,
+        onEvent: (event) => {
+          const value = event as unknown;
+          const sessionId = sessionOf(value);
+          if (!this.sessionId) {
+            // A consumer cannot be registered with a session filter until create
+            // returns. Buffer this small race window so concurrent invocations
+            // in one directory cannot leak each other's early events.
+            this.preSessionEvents.push({ event, sessionId });
+            return;
+          }
+          // The host is shared by all invocations; never let a known foreign
+          // session leak into this process's stream.
+          if (this.sessionId && sessionId !== this.sessionId) return;
+          this.push({
+            stream: "stdout",
+            raw: JSON.stringify(value),
+            parsed: value,
+            normalized: normalizedV2(this.invocation.runId, event, this.toolNames),
+            sessionId,
+          });
+        },
+        onError: (error: UiHostManagerBackendFailureError) => {
+          this.hostFailure = error;
+          if (error instanceof UiHostManagerEventQueueOverflowError) {
+            if (error.sessionId) this.sessionId = error.sessionId;
+            this.canceled = true;
+          }
+          this.onDiagnostic({
+            event: "event_stream_failure",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+            ...errorDetails(error),
+          });
+          this.push({ stream: "stderr", raw: error.message });
+          this.abortController.abort();
+          // A broken event stream can leave the provider running even though
+          // the local process is no longer able to observe it. Stop only this
+          // session, and keep failures in the shared manager best effort.
+          const sessionId =
+            this.sessionId ??
+            (error instanceof UiHostManagerEventQueueOverflowError ? error.sessionId : undefined);
+          if (this.options.client) void this.requestInterrupt(this.options.client, sessionId);
+          else if (sessionId)
+            void this.options.hostManager
+              .withHost(async (client) => {
+                await this.requestInterrupt(client, sessionId);
+              })
+              .catch(() => undefined);
+        },
+      });
+      const execute = async (client: V2Client) => {
+        const model = this.invocation.model ?? this.invocation.agent.model;
+        if (this.createsSession) {
+          const reservedId = this.sessionId ?? createV2SessionId();
+          this.onDiagnostic({
+            event: "session_create",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: reservedId,
+            state: "started",
+          });
+          const slash = model.indexOf("/");
+          const creating = client.session.create(
+            {
+              location: { directory: this.invocation.repositoryRoot },
+              ...(this.invocation.agent.opencodeAgent
+                ? { agent: this.invocation.agent.opencodeAgent }
+                : {}),
+              id: reservedId,
+              ...(model
+                ? {
+                    model: {
+                      providerID: slash < 0 ? "" : model.slice(0, slash),
+                      id: slash < 0 ? model : model.slice(slash + 1),
+                    },
+                  }
+                : {}),
+            },
+            { signal: this.abortController.signal },
+          );
+          // Still observe a creation that outlives cancellation so a session
+          // created by a slow host is interrupted rather than leaked.
+          // Keep observing a late create, but never make process finalization
+          // depend on an SDK promise that may never settle.
+          void creating.then(
+            (created: { id: string }) => {
+              if (this.canceled || this.hostFailure) {
+                this.sessionId = created.id;
+                void this.requestInterrupt(client, created.id);
+              }
+            },
+            () => undefined,
+          );
+          let created: Awaited<typeof creating> | undefined;
+          try {
+            created = await this.abortable(creating);
+          } catch (error) {
+            this.onDiagnostic({
+              event: "session_create_failure",
+              backend: "v2-client",
+              runId: this.invocation.runId,
+              sessionId: reservedId,
+              ...errorDetails(error),
+            });
+            throw error;
+          }
+          this.sessionId = created!.id;
+          this.onDiagnostic({
+            event: "session_create",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "succeeded",
+          });
+          if (this.hostFailure) void this.requestInterrupt(client, this.sessionId);
+          const pending = this.preSessionEvents.splice(0);
+          for (const item of pending) {
+            if (item.sessionId === this.sessionId)
+              this.push({
+                stream: "stdout",
+                raw: JSON.stringify(item.event),
+                parsed: item.event,
+                normalized: normalizedV2(this.invocation.runId, item.event, this.toolNames),
+                sessionId: item.sessionId,
+              });
+          }
+          if (this.canceled) this.requestInterrupt(client);
+        }
+        const text = this.invocation.systemPrompt
+          ? `${this.invocation.systemPrompt}\n\n${this.invocation.prompt}`
+          : this.invocation.prompt;
+        let messagesBeforePrompt: V2Message[];
+        this.onDiagnostic({
+          event: "session_message_retrieval",
+          backend: "v2-client",
+          runId: this.invocation.runId,
+          sessionId: this.sessionId,
+          state: "started",
+        });
+        try {
+          messagesBeforePrompt =
+            (await this.abortable(
+              allSessionMessages(client, this.sessionId!, this.abortController.signal),
+            )) ?? [];
+          this.onDiagnostic({
+            event: "session_message_retrieval",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "succeeded",
+          });
+        } catch (error) {
+          this.onDiagnostic({
+            event: "session_message_retrieval_failure",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            ...errorDetails(error),
+          });
+          throw error;
+        }
+        try {
+          this.onDiagnostic({
+            event: "session_prompt",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "started",
+          });
+          await this.abortable(
+            client.session.prompt(
+              {
+                sessionID: this.sessionId!,
+                text,
+              },
+              { signal: this.abortController.signal },
+            ),
+          );
+          this.onDiagnostic({
+            event: "session_prompt",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "succeeded",
+          });
+        } catch (error) {
+          this.onDiagnostic({
+            event: "session_prompt_failure",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            ...errorDetails(error),
+          });
+          throw error;
+        }
+        // prompt is not required to wait for execution on every V2 host.
+        try {
+          this.onDiagnostic({
+            event: "session_wait",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "started",
+          });
+          await this.abortable(
+            client.session.wait(
+              {
+                sessionID: this.sessionId!,
+              },
+              { signal: this.abortController.signal },
+            ),
+          );
+          this.onDiagnostic({
+            event: "session_wait",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "succeeded",
+          });
+        } catch (error) {
+          this.onDiagnostic({
+            event: "session_wait_failure",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            ...errorDetails(error),
+          });
+          throw error;
+        }
+        let messagesAfterPrompt: V2Message[];
+        this.onDiagnostic({
+          event: "session_message_retrieval",
+          backend: "v2-client",
+          runId: this.invocation.runId,
+          sessionId: this.sessionId,
+          state: "started",
+        });
+        try {
+          messagesAfterPrompt =
+            (await this.abortable(
+              allSessionMessages(client, this.sessionId!, this.abortController.signal),
+            )) ?? [];
+          this.onDiagnostic({
+            event: "session_message_retrieval",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            state: "succeeded",
+          });
+        } catch (error) {
+          this.onDiagnostic({
+            event: "session_message_retrieval_failure",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId: this.sessionId,
+            ...errorDetails(error),
+          });
+          throw error;
+        }
+        // The prompt response has no causal assistant-message ID. The
+        // before/after ID boundary is therefore the safest supported
+        // correlation; it deliberately has no fallback to an older response.
+        const latestAssistant = newAssistantMessage(messagesBeforePrompt, messagesAfterPrompt);
+        if (latestAssistant) {
+          this.push({
+            stream: "stdout",
+            // SessionMessageAssistant is part of the generated client model;
+            // emit it directly rather than inventing an SDK event discriminant.
+            raw: JSON.stringify(latestAssistant),
+            parsed: latestAssistant,
+            sessionId: this.sessionId,
+          });
+        }
+      };
+      if (this.options.client) await execute(this.options.client);
+      else await this.abortable(this.options.hostManager.withHost(execute));
+      if (this.hostFailure)
+        return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+      this.onDiagnostic({
+        event: "run",
+        backend: "v2-client",
+        runId: this.invocation.runId,
+        sessionId: this.sessionId,
+        state: "succeeded",
+      });
+      return { code: 0, signal: null, signalCode: null, sessionId: this.sessionId };
+    } catch (error) {
+      if (this.canceled) {
+        return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+      }
+      if (this.hostFailure)
+        return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+      const message = error instanceof Error ? error.message : String(error);
+      this.push({ stream: "stderr", raw: `V2 error: ${message}`, sessionId: this.sessionId });
+      return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+    } finally {
+      // Cancellation is best effort. In particular, a host may never settle
+      // create/prompt/wait/list; exit must still release the UI shutdown path.
+      void this.interruptPromise;
+      this.subscription?.unsubscribe();
+      this.finish();
+    }
+  }
+
+  private abortable<T>(operation: Promise<T> | undefined): Promise<T | undefined> {
+    if (!operation) return Promise.resolve(undefined);
+    if (this.abortController.signal.aborted)
+      return Promise.reject(new Error("V2 process canceled"));
+    return new Promise<T | undefined>((resolve, reject) => {
+      const onAbort = () => {
+        this.abortController.signal.removeEventListener("abort", onAbort);
+        reject(new Error("V2 process canceled"));
+      };
+      this.abortController.signal.addEventListener("abort", onAbort, { once: true });
+      operation.then(
+        (value) => {
+          this.abortController.signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          this.abortController.signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private requestInterrupt(client?: V2Client, sessionId = this.sessionId): Promise<void> {
+    if (this.interruptRequested || !sessionId) return Promise.resolve();
+    this.interruptRequested = true;
+    this.onDiagnostic({
+      event: "session_interrupt",
+      backend: "v2-client",
+      runId: this.invocation.runId,
+      sessionId,
+      state: "requested",
+    });
+    const interrupt = client?.session.interrupt;
+    if (!interrupt) return Promise.resolve();
+    // Never let an SDK interrupt failure reject exit (or the shared host).
+    const pending = Promise.resolve()
+      .then(() => interrupt({ sessionID: sessionId }))
+      .then(
+        () => {
+          this.onDiagnostic({
+            event: "session_interrupt",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId,
+            state: "stopped",
+          });
+          return undefined;
+        },
+        (error) => {
+          this.onDiagnostic({
+            event: "session_interrupt_failure",
+            backend: "v2-client",
+            runId: this.invocation.runId,
+            sessionId,
+            ...errorDetails(error),
+          });
+          return undefined;
+        },
+      );
+    this.interruptPromise = pending;
+    return pending;
+  }
+
+  private finish() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const waiter of this.waiters) waiter({ value: undefined, done: true });
+    this.waiters.length = 0;
+  }
+  kill(): void {}
+  cancel(): void {
+    if (this.closed || this.canceled) return;
+    this.canceled = true;
+    this.abortController.abort();
+    // The client seam is available in tests; production resolves it through
+    // withHost without touching the manager lifecycle.
+    if (this.options.client) this.requestInterrupt(this.options.client);
+    else if (this.sessionId) {
+      void this.options.hostManager
+        .withHost(async (client) => {
+          this.requestInterrupt(client);
+        })
+        .catch(() => undefined);
+    }
+  }
+  continue(prompt: string): BackendProcess {
+    if (!this.sessionId) throw new Error("Cannot continue before V2 exposes a session ID");
+    return new V2OpenCodeProcess({ ...this.invocation, prompt }, this.options, this.sessionId);
+  }
+  [Symbol.asyncIterator](): AsyncIterator<BackendEvent> {
+    return {
+      next: () =>
+        this.events.length
+          ? Promise.resolve({ value: this.events.shift()!, done: false })
+          : this.closed
+            ? Promise.resolve({ value: undefined, done: true })
+            : new Promise((resolve) => this.waiters.push(resolve)),
+    };
+  }
+}
+
+/** Service V2 adapter. It creates exactly one session per invocation. */
+export class V2OpenCodeAdapter implements BackendAdapter {
+  readonly supportsConcurrent = true;
+  constructor(private readonly options: V2OpenCodeOptions) {}
+  start(invocation: BackendInvocation): BackendProcess {
+    return new V2OpenCodeProcess(invocation, this.options);
   }
 }

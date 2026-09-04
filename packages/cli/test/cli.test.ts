@@ -12,6 +12,7 @@ import {
   PlanSchema,
   validatePlansAgainstMissions,
 } from "../src/plans";
+import { parseUiBackend } from "../src/ui";
 
 const cli = join(import.meta.dir, "..", "src", "index.ts"),
   repos = new Set<string>();
@@ -32,6 +33,13 @@ test("changePlanSteps requires non-empty entries", () => {
   expect(
     PlanInputSchema.parse({ ...base, changePlanSteps: ["First", "Second"] }).changePlanSteps,
   ).toEqual(["First", "Second"]);
+});
+
+test("the retired v2-sdk backend is rejected instead of aliased", () => {
+  expect(() => parseUiBackend("v2-sdk")).toThrow(
+    'The "v2-sdk" UI backend is no longer supported; use "v2-client" instead.',
+  );
+  expect(parseUiBackend("v2-client")).toBe("v2-client");
 });
 
 test("plan cascade deletion removes all revisions and linked missions only", () => {
@@ -95,6 +103,9 @@ async function repo() {
   await new Promise<void>((r, j) =>
     execFile("git", ["init", "-q"], { cwd: d }, (e) => (e ? j(e) : r())),
   );
+  await new Promise<void>((r, j) =>
+    execFile("git", ["config", "commit.gpgsign", "false"], { cwd: d }, (e) => (e ? j(e) : r())),
+  );
   expect((await run(d, "mission", "init")).exitCode).toBe(0);
   return d;
 }
@@ -118,6 +129,16 @@ test("workflow help documents storage and worktree assumptions", async () => {
   expect(help.stdout).toContain("status");
   expect(help.stdout).toContain("trace");
   expect(help.stdout).toContain("stop");
+});
+
+test("CLI rejects v2-sdk before resolving the project or starting the UI", async () => {
+  const d = await mkdtemp(join(tmpdir(), "factory-cli-backend-"));
+  repos.add(d);
+  const result = await run(d, "ui", "--backend", "v2-sdk");
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr).toContain('use "v2-client" instead');
+  expect(result.stderr).not.toContain("listening at");
+  await expect(readdir(join(d, ".factory"))).rejects.toThrow();
 });
 
 async function planInput(d: string) {
@@ -637,6 +658,7 @@ describe("standalone plans", () => {
     await mkdir(join(skills, "unrelated"), { recursive: true });
     await writeFile(join(skills, "unrelated", "keep.md"), "keep");
     await writeFile(join(agents, "plan-mission.md"), "stale");
+    await writeFile(join(agents, "scout.md"), "stale");
     await writeFile(join(agents, "unrelated.md"), "keep");
     const again = await run(d, "mission", "init", "--skills", "--json");
     expect(again.exitCode).toBe(0);
@@ -653,6 +675,9 @@ describe("standalone plans", () => {
     expect(await readFile(join(skills, "unrelated", "keep.md"), "utf8")).toBe("keep");
     expect(await readFile(join(agents, "plan-mission.md"), "utf8")).toBe(
       await readFile(join(agentSource, "plan-mission.md"), "utf8"),
+    );
+    expect(await readFile(join(agents, "scout.md"), "utf8")).toBe(
+      await readFile(join(agentSource, "scout.md"), "utf8"),
     );
     expect(await readFile(join(agents, "unrelated.md"), "utf8")).toBe("keep");
   });

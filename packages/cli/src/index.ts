@@ -34,7 +34,7 @@ import {
 } from "./plans";
 import { lookupRoster } from "./roster";
 import { recoverFactoryTransaction, withFactoryLock } from "./storage";
-import { startUiServer } from "./ui";
+import { parseUiBackend, startUiServer } from "./ui";
 import { startWorkflow } from "./workflow-service";
 import { openWorkflowStorage } from "./workflow-storage";
 import type { RunRecord } from "./workflow-storage";
@@ -100,6 +100,7 @@ async function paths() {
   return { root, dir, file: join(dir, "missions.jsonl") };
 }
 const missionSkills = ["plan-mission", "run-mission", "visualize-change"];
+const missionAgents = ["plan-mission", "scout"];
 const skillSource = join(import.meta.dir, "..", "..", "..", ".agents", "skills");
 const agentSource = join(import.meta.dir, "..", "..", "..", ".opencode", "agents");
 async function installMissionSkills(root: string) {
@@ -118,13 +119,16 @@ async function installMissionSkills(root: string) {
   }
   const agents = join(root, ".opencode", "agents");
   await mkdir(agents, { recursive: true });
-  const target = join(agents, "plan-mission.md"),
-    temporary = join(agents, `.plan-mission.tmp-${process.pid}-${Date.now()}-${Math.random()}`);
-  try {
-    await cp(join(agentSource, "plan-mission.md"), temporary);
-    await rename(temporary, target);
-  } finally {
-    await rm(temporary, { force: true });
+  for (const name of missionAgents) {
+    const target = join(agents, `${name}.md`),
+      temporary = join(agents, `.${name}.tmp-${process.pid}-${Date.now()}-${Math.random()}`);
+    try {
+      await cp(join(agentSource, `${name}.md`), temporary);
+      await rm(target, { force: true });
+      await rename(temporary, target);
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }
 function validateAll(missions: MissionType[]) {
@@ -386,6 +390,15 @@ workflowStop.action(async (id: string, _, cmd) => {
     if (run.status === "running" && run.childPid) {
       try {
         await verifyProcessIdentity(run);
+        const cancellation = storage.requestCancellation(id);
+        if (!cancellation.accepted) {
+          emitWorkflowTerminal(
+            cancellation.run,
+            isJson(cmd),
+            cancellation.run ? await persistedResult(cancellation.run) : undefined,
+          );
+          return;
+        }
         process.kill(run.childPid, "SIGTERM");
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
@@ -401,11 +414,7 @@ workflowStop.action(async (id: string, _, cmd) => {
       }
       let stopped;
       try {
-        stopped = storage.finishRun(id, "failed", {
-          code: "STOPPED",
-          failureCode: "stopped",
-          message: "Run stopped by user",
-        });
+        stopped = storage.finishRun(id, "cancelled");
         storage.clearAgentProcess(id);
       } catch (error) {
         const latest = storage.getRun(id);
@@ -427,19 +436,26 @@ workflowStop.action(async (id: string, _, cmd) => {
 const ui = program
   .command("ui")
   .description("Serve the local Workflow Session Trace UI")
-  .option("--port <port>", "HTTP port", "4173");
+  .option("--port <port>", "HTTP port", "4173")
+  .option(
+    "--backend <backend>",
+    "OpenCode backend for UI-launched workflows (default: v2-client)",
+    "v2-client",
+  );
 ui.action(async (opts) => {
   const port = Number(opts.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw Error("Port must be an integer from 0 to 65535");
+  const backend = parseUiBackend(opts.backend);
   const running = await startUiServer({
     repositoryRoot: await projectRoot(),
     port,
+    backend,
   });
   console.error(`Workflow Session Trace UI listening at ${running.url}`);
   await new Promise<void>((resolve) => {
-    const stop = () => {
-      running.close();
+    const stop = async () => {
+      await running.close();
       resolve();
     };
     process.once("SIGINT", stop);
@@ -450,7 +466,7 @@ const mission = program.command("mission");
 const init = mission
   .command("init")
   .option("--track", "Keep .factory records trackable")
-  .option("--skills", "Install Factory mission skills and the plan-mission agent");
+  .option("--skills", "Install Factory mission skills and bundled agents");
 jsonOption(init);
 init.action(async (opts, cmd) =>
   withLock(async () => {

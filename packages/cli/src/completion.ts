@@ -51,6 +51,26 @@ function assistantText(event: BackendEvent): string | undefined {
   }
   if (!value || typeof value !== "object") return undefined;
   const object = value as Record<string, unknown>;
+  if (object.type === "session.text.delta") {
+    const data = object.data;
+    return data &&
+      typeof data === "object" &&
+      typeof (data as Record<string, unknown>).delta === "string"
+      ? (data as Record<string, string>).delta
+      : undefined;
+  }
+  if (object.type === "session.message.content.updated") {
+    const content =
+      object.data && typeof object.data === "object"
+        ? (object.data as Record<string, unknown>).content
+        : undefined;
+    if (Array.isArray(content))
+      return content
+        .filter((part): part is Record<string, unknown> => !!part && typeof part === "object")
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text as string)
+        .join("");
+  }
   if (object.type === "text") {
     const part = object.part;
     return part &&
@@ -60,7 +80,7 @@ function assistantText(event: BackendEvent): string | undefined {
       : undefined;
   }
   const role = object.role ?? (object.message as Record<string, unknown> | undefined)?.role;
-  if (role !== "assistant") return undefined;
+  if (role !== "assistant" && object.type !== "assistant") return undefined;
   const content =
     object.content ??
     object.text ??
@@ -84,7 +104,26 @@ function assistantText(event: BackendEvent): string | undefined {
 
 /** Extracts exactly one sentinel pair from assistant events and validates its result schema. */
 export function parseFinalAssistantResult(events: readonly BackendEvent[]): Parsed {
-  const text = events
+  // A durable message is authoritative. When a host delivered both deltas and
+  // the stored message, parsing both would duplicate the response and produce
+  // an incorrect "ambiguous sentinel" result.
+  const retrieved = events.filter((event) => {
+    let value = event.parsed;
+    if (value === undefined) {
+      try {
+        value = JSON.parse(event.raw);
+      } catch {
+        return false;
+      }
+    }
+    return (
+      !!value &&
+      typeof value === "object" &&
+      (value as Record<string, unknown>).type === "assistant"
+    );
+  });
+  const source = retrieved.length ? retrieved : events;
+  const text = source
     .map(assistantText)
     .filter((part): part is string => part !== undefined)
     .join("")

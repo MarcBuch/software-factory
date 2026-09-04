@@ -1,13 +1,22 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
 import { DeletePlanResponseSchema } from "@software-factory/contracts";
 
+import { ensureV2AgentAvailable, OpenCodeAdapter, V2OpenCodeAdapter } from "./backend";
+import {
+  defaultLifecycleDiagnostic,
+  errorDetails,
+  type LifecycleDiagnosticSink,
+} from "./lifecycle-diagnostics";
 import { deletePlanCascadeAtomic, loadPlans } from "./plans";
+import { lookupRoster } from "./roster";
 import { recoverFactoryTransaction, withFactoryLock } from "./storage";
+import { UiHostManager, type UiHostFactory } from "./ui-host-manager";
 import {
   startWorkflow,
+  stopWorkflow,
   validateWorkflowInput,
   WorkflowAlreadyRunning,
   type WorkflowLaunch,
@@ -17,12 +26,48 @@ import { openWorkflowStorage, type PublicRun, type WorkflowStorage } from "./wor
 export type UiServerOptions = {
   port?: number;
   repositoryRoot: string;
+  /** Backend used by UI-launched workflows. The UI intentionally defaults to V2. */
+  backend?: UiBackend;
   assetsDirectory?: string;
+  /** Test seam for the shared service client. Production creates one manager per server. */
+  hostManager?: UiHostManager;
+  hostFactory?: UiHostFactory;
   launch?: (
     root: string,
     input: ReturnType<typeof validateWorkflowInput>,
   ) => Promise<WorkflowLaunch>;
+  onDiagnostic?: LifecycleDiagnosticSink;
+  /** Cancellation grace before unresolved SDK work is abandoned. */
+  shutdownGraceMs?: number;
 };
+
+const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
+
+async function settleWithin(promise: Promise<unknown>, timeoutMs: number) {
+  let timer: Timer | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export const UiBackendValues = ["v1-cli", "v2-client"] as const;
+export type UiBackend = (typeof UiBackendValues)[number];
+
+const V2_SDK_REJECTION = 'The "v2-sdk" UI backend is no longer supported; use "v2-client" instead.';
+
+export function parseUiBackend(value: string | undefined): UiBackend {
+  const backend = value ?? "v2-client";
+  if (backend === "v2-sdk") throw Error(V2_SDK_REJECTION);
+  if ((UiBackendValues as readonly string[]).includes(backend)) return backend as UiBackend;
+  throw Error(`Invalid UI backend: ${backend}. Expected v1-cli or v2-client`);
+}
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
@@ -57,15 +102,82 @@ function numberParam(value: string | null, fallback: number) {
   return Number(value);
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function assetRoot(options: UiServerOptions) {
   return options.assetsDirectory ?? join(import.meta.dir, "..", "ui", "dist");
 }
 
 /** Creates the repository-local trace API. It deliberately binds to loopback only. */
 export async function startUiServer(options: UiServerOptions) {
-  const storage = await openWorkflowStorage(options.repositoryRoot);
+  // Resolve once so every service request uses the same identity (notably on
+  // macOS, where /var and /private/var are aliases).
+  const repositoryRoot = await realpath(options.repositoryRoot);
+  const backend = parseUiBackend(options.backend);
+  (options.onDiagnostic ?? defaultLifecycleDiagnostic)({ event: "backend_selected", backend });
+  const storage = await openWorkflowStorage(repositoryRoot);
+  // Keep the existing launch seam intact for UI tests and callers that provide their
+  // own workflow implementation. The normal UI path owns one shared V2 service client.
+  const hostManager =
+    backend === "v2-client"
+      ? (options.hostManager ??
+        (options.launch
+          ? undefined
+          : new UiHostManager({
+              factory: options.hostFactory,
+              options: {
+                config: { directory: repositoryRoot, project: true },
+              },
+              onDiagnostic: options.onDiagnostic,
+              shutdownGraceMs: options.shutdownGraceMs,
+            })))
+      : undefined;
+  const adapter =
+    backend === "v1-cli"
+      ? new OpenCodeAdapter()
+      : hostManager
+        ? new V2OpenCodeAdapter({ hostManager, onDiagnostic: options.onDiagnostic })
+        : undefined;
   const root = assetRoot(options);
+  const stopRun = async (runId: string) => {
+    const diagnostic = options.onDiagnostic ?? defaultLifecycleDiagnostic;
+    diagnostic({ event: "restart_stop", backend, runId, state: "started" });
+    let serviceClient;
+    if (hostManager) {
+      try {
+        serviceClient = await hostManager.withHost(async (client) => client);
+      } catch {
+        // Let stopWorkflow persist the conservative orphan failure rather than
+        // leaving a restarted service run deceptively marked as running.
+      }
+    }
+    try {
+      const result = await stopWorkflow(
+        repositoryRoot,
+        runId,
+        serviceClient ? { serviceClient } : undefined,
+      );
+      diagnostic({ event: "restart_stop", backend, runId, state: "stopped" });
+      return result;
+    } catch (error) {
+      diagnostic({
+        event: "restart_stop",
+        backend,
+        runId,
+        state: "failed",
+        ...errorDetails(error),
+      });
+      throw error;
+    }
+  };
   const clients = new Map<(value: unknown) => void, string>();
+  const completions = new Set<Promise<unknown>>();
+  // A set is sufficient for shutdown, but deletion must identify the exact
+  // workflow whose cancellation it requested. Keep a settled status per run so
+  // rejected completion promises are observed without allowing them to escape.
+  const ownedCompletions = new Map<string, Promise<{ ok: true } | { ok: false; error: unknown }>>();
   let timer: Timer | undefined;
   const poll = () => {
     const next = JSON.stringify(storage.changeToken());
@@ -88,9 +200,9 @@ export async function startUiServer(options: UiServerOptions) {
         const path = url.pathname;
         if (path === "/api/health") return json({ ok: true });
         if (request.method === "GET" && path === "/api/plans") {
-          const plans = await withFactoryLock(options.repositoryRoot, async () => {
-            await recoverFactoryTransaction(options.repositoryRoot);
-            return loadPlans(join(options.repositoryRoot, ".factory", "plans.jsonl"), []);
+          const plans = await withFactoryLock(repositoryRoot, async () => {
+            await recoverFactoryTransaction(repositoryRoot);
+            return loadPlans(join(repositoryRoot, ".factory", "plans.jsonl"), []);
           });
           const latest = new Map<string, (typeof plans)[number]>();
           for (const plan of plans) {
@@ -104,9 +216,9 @@ export async function startUiServer(options: UiServerOptions) {
           const planId = decodeURIComponent(deletePlanMatch[1]!);
           try {
             const result = await deletePlanCascadeAtomic({
-              repositoryRoot: options.repositoryRoot,
-              planFile: join(options.repositoryRoot, ".factory", "plans.jsonl"),
-              missionFile: join(options.repositoryRoot, ".factory", "missions.jsonl"),
+              repositoryRoot,
+              planFile: join(repositoryRoot, ".factory", "plans.jsonl"),
+              missionFile: join(repositoryRoot, ".factory", "missions.jsonl"),
               planId,
             });
             return json(
@@ -130,8 +242,35 @@ export async function startUiServer(options: UiServerOptions) {
             return json({ error: error instanceof Error ? error.message : String(error) }, 400);
           }
           try {
-            const launch = await (options.launch ?? startWorkflow)(options.repositoryRoot, input);
-            void launch.completion.catch(() => undefined);
+            const launch = options.launch
+              ? await options.launch(repositoryRoot, input)
+              : await startWorkflow(repositoryRoot, input, {
+                  adapter: adapter!,
+                  ...(backend === "v2-client" && hostManager
+                    ? {
+                        beforeStart: () =>
+                          hostManager.withHost((client) =>
+                            ensureV2AgentAvailable(
+                              client,
+                              repositoryRoot,
+                              lookupRoster(input.agentName).opencodeAgent,
+                              options.onDiagnostic,
+                            ),
+                          ),
+                      }
+                    : {}),
+                });
+            const completion = launch.completion.catch(() => undefined);
+            completions.add(completion);
+            void completion.finally(() => completions.delete(completion)).catch(() => undefined);
+            const ownedCompletion = launch.completion.then(
+              () => ({ ok: true as const }),
+              (error) => ({ ok: false as const, error }),
+            );
+            ownedCompletions.set(launch.run.id, ownedCompletion);
+            // Keep the settled outcome until deletion has made its decision.
+            // Otherwise a rejection just before DELETE looks like an orphan.
+            void ownedCompletion.catch(() => undefined);
             if (launch.run.status !== "running")
               return json(
                 {
@@ -167,7 +306,45 @@ export async function startUiServer(options: UiServerOptions) {
         if (request.method === "DELETE" && deleteMatch) {
           const runId = decodeURIComponent(deleteMatch[1]!);
           try {
+            const run = storage.getRun(runId);
+            if (
+              run?.status === "running" &&
+              (run.executionKind === "service" || run.executionKind === "embedded")
+            ) {
+              const ownedCompletion = ownedCompletions.get(runId);
+              const stopped = await stopRun(runId);
+              if (stopped?.status === "failed")
+                return json(
+                  { error: stopped.failure?.message ?? "Unable to safely stop workflow" },
+                  409,
+                );
+              // A restarted service has no local completion callback to own
+              // boundary restoration and artifact cleanup. Stopping its SDK
+              // session is safe, but deleting its evidence is not.
+              if (!ownedCompletion)
+                return json(
+                  { error: `Workflow completion unavailable after service restart: ${runId}` },
+                  409,
+                );
+            }
+            const completion = ownedCompletions.get(runId);
+            if (completion) {
+              const settled = await Promise.race([
+                completion.then((result) => ({ kind: "settled" as const, result })),
+                Bun.sleep(options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS).then(() => ({
+                  kind: "timeout" as const,
+                })),
+              ]);
+              if (settled.kind === "timeout")
+                return json({ error: `Workflow completion timed out: ${runId}` }, 409);
+              if (!settled.result.ok)
+                return json(
+                  { error: `Workflow completion failed: ${errorMessage(settled.result.error)}` },
+                  409,
+                );
+            }
             await storage.deleteRun(runId);
+            ownedCompletions.delete(runId);
             return json({ deleted: true, runId });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -283,16 +460,32 @@ export async function startUiServer(options: UiServerOptions) {
     if (timer) clearInterval(timer);
     clients.clear();
     storage.close();
+    await hostManager?.close();
     throw error;
   }
   return {
     server,
     url: new URL(`http://127.0.0.1:${server.port}`),
-    close() {
+    async close() {
+      const shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
       if (timer) clearInterval(timer);
       clients.clear();
-      storage.close();
+      // Cancel owned embedded sessions before closing the shared host. Otherwise
+      // the host disappears while SDK prompts remain active and their runs leak.
+      const active = storage
+        .listRuns({ limit: 200 })
+        .runs.filter(
+          (run) =>
+            run.status === "running" &&
+            (run.executionKind === "service" || run.executionKind === "embedded"),
+        );
+      // Cancellation is deliberately bounded: SDK create/prompt/wait/list
+      // calls can ignore abort and otherwise hold the server forever.
+      await settleWithin(Promise.allSettled(active.map((run) => stopRun(run.id))), shutdownGraceMs);
+      await settleWithin(Promise.allSettled(completions), shutdownGraceMs);
       server.stop();
+      await hostManager?.close();
+      storage.close();
     },
   };
 }

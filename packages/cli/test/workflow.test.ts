@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { OpenCodeAdapter } from "../src/backend";
+import { OpenCodeAdapter, normalizedV2 } from "../src/backend";
 import { parseFinalAssistantResult } from "../src/completion";
 import {
   BUILTIN_ROSTER_VERSION,
@@ -18,8 +18,111 @@ import {
   TraceEventSchema,
   WorkflowInputSchema,
 } from "../src/workflow";
+import { completedVisualization, delegatedExplorer } from "../src/workflow-service";
 
 const result = { status: "success" as const, summary: "done", artifacts: [], notes: [] };
+
+function liveV2Event(type: string, data: Record<string, unknown>) {
+  return normalizedV2("planner-run", { type, created: 1_735_000_000_000, data } as never);
+}
+
+test("planner accepts a live V2 generic explorer delegation and textual completion", () => {
+  const start = liveV2Event("session.tool.called", {
+    sessionID: "ses_planner",
+    id: "call-explorer",
+    input: { agent: "codebase-explorer", prompt: "Inspect the repository" },
+  });
+  const finish = liveV2Event("session.tool.success", {
+    sessionID: "ses_planner",
+    id: "call-explorer",
+    content: [{ type: "text", text: "Repository findings" }],
+  });
+  expect(
+    delegatedExplorer({ events: [{ normalized: start }, { normalized: finish }] } as never),
+  ).toBe(true);
+});
+
+test("planner does not treat prompt text, unrelated generic tools, or failed V2 delegation as evidence", () => {
+  const promptText = liveV2Event("session.message.content.updated", {
+    sessionID: "ses_planner",
+    messageID: "msg-planner",
+    content: [{ type: "text", text: "delegate to codebase-explorer" }],
+  });
+  const unrelated = liveV2Event("session.tool.success", {
+    sessionID: "ses_planner",
+    id: "call-unrelated",
+    content: [{ type: "text", text: "codebase-explorer" }],
+  });
+  const failedStart = liveV2Event("session.tool.called", {
+    sessionID: "ses_planner",
+    id: "call-failed",
+    input: { agent: "codebase-explorer" },
+  });
+  const failed = liveV2Event("session.tool.failed", {
+    sessionID: "ses_planner",
+    id: "call-failed",
+    error: { name: "SubagentError", message: "exploration failed" },
+  });
+  expect(
+    delegatedExplorer({
+      events: [
+        { normalized: promptText },
+        { normalized: unrelated },
+        { normalized: failedStart },
+        { normalized: failed },
+      ],
+    } as never),
+  ).toBe(false);
+});
+
+test("planner accepts live V2 generic visualize-change call paired by call id", () => {
+  const start = liveV2Event("session.tool.called", {
+    sessionID: "ses_planner",
+    id: "call-visualize",
+    input: { name: "visualize-change", path: ".factory/architecture/run.html" },
+  });
+  const finish = liveV2Event("session.tool.success", {
+    sessionID: "ses_planner",
+    id: "call-visualize",
+    content: [{ type: "text", text: "Visualization skill completed" }],
+  });
+  expect(
+    completedVisualization({ events: [{ normalized: start }, { normalized: finish }] } as never),
+  ).toBe(true);
+});
+
+test("planner rejects visualize prompt spoofing, mismatched ids, and failed calls", () => {
+  const prompt = liveV2Event("session.message.content.updated", {
+    sessionID: "ses_planner",
+    messageID: "msg-planner",
+    content: [{ type: "text", text: "load visualize-change" }],
+  });
+  const start = liveV2Event("session.tool.called", {
+    sessionID: "ses_planner",
+    id: "call-visualize",
+    input: { name: "visualize-change" },
+  });
+  const failed = liveV2Event("session.tool.failed", {
+    sessionID: "ses_planner",
+    id: "call-visualize",
+    error: { name: "Denied", message: "permission denied" },
+  });
+  const mismatched = liveV2Event("session.tool.success", {
+    sessionID: "ses-other",
+    id: "different-call",
+    content: [{ type: "text", text: "done" }],
+  });
+  expect(
+    completedVisualization({
+      events: [
+        { normalized: prompt },
+        { normalized: start },
+        { normalized: failed },
+        { normalized: mismatched },
+      ],
+    } as never),
+  ).toBe(false);
+});
 
 test("workflow contracts accept valid domain records", () => {
   expect(WorkflowInputSchema.parse({ request: "Build it", agentName: "builder" })).toEqual({
@@ -129,6 +232,7 @@ test("built-in scout roster lookup and prompt rendering are deterministic", () =
   expect(BUILTIN_ROSTER_VERSION).toBe(1);
   const scout = getRosterEntry("scout");
   expect(scout?.name).toBe("scout");
+  expect(scout?.opencodeAgent).toBe("scout");
   expect(scout?.allowedTools).toEqual(["read", "glob", "grep"]);
   expect(scout?.writeBoundary).toEqual([]);
   expect(getRosterEntry("missing")).toBeUndefined();
