@@ -75,17 +75,20 @@ async function repo(fake: string) {
   await new Promise<void>((ok, fail) =>
     execFile("git", ["init", "-q"], { cwd: dir }, (e) => (e ? fail(e) : ok())),
   );
+  for (const [key, value] of [
+    ["user.email", "x@y"],
+    ["user.name", "x"],
+    ["commit.gpgsign", "false"],
+  ])
+    await new Promise<void>((ok, fail) =>
+      execFile("git", ["config", key, value], { cwd: dir }, (e) => (e ? fail(e) : ok())),
+    );
   await writeFile(join(dir, "tracked.txt"), "original\n");
   await new Promise<void>((ok, fail) =>
     execFile("git", ["add", "."], { cwd: dir }, (e) => (e ? fail(e) : ok())),
   );
   await new Promise<void>((ok, fail) =>
-    execFile(
-      "git",
-      ["-c", "user.email=x@y", "-c", "user.name=x", "commit", "-qm", "init"],
-      { cwd: dir },
-      (e) => (e ? fail(e) : ok()),
-    ),
+    execFile("git", ["commit", "-qm", "init"], { cwd: dir }, (e) => (e ? fail(e) : ok())),
   );
   return { dir, env: { FACTORY_OPENCODE_EXECUTABLE: fake } };
 }
@@ -238,11 +241,16 @@ test("planner rejects an external plan write before draft creation", async () =>
     verificationStrategy: "Run focused test",
   };
   const fake = await fakeScript(
-    `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"visualize",state:{status:"completed",input:{name:"visualize-change"},output:"skill"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"ok",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"architecture"}],notes:[],plan:${JSON.stringify(plan)}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    `const fs=await import("node:fs/promises"); await new Promise(r=>setTimeout(r,1000)); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"visualize",state:{status:"completed",input:{name:"visualize-change"},output:"skill"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"ok",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"architecture"}],notes:[],plan:${JSON.stringify(plan)}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content,sessionID:"test-session"})+String.fromCharCode(10));`,
   );
   const p = await repo(fake);
   const input = join(p.dir, "external-plan.json");
   await writeFile(input, JSON.stringify(plan));
+  await new Promise<void>((resolve, reject) =>
+    execFile("git", ["add", "external-plan.json"], { cwd: p.dir }, (error) =>
+      error ? reject(error) : resolve(),
+    ),
+  );
   const workflow = runAsync(p.dir, ["workflow", "run", "--agent", "planner", "plan it", "--json"], {
     ...p.env,
     FACTORY_TEST_PLANNER_POST_STATE_BARRIER: barrier,
@@ -499,8 +507,8 @@ test("live expected backend can be stopped by a second CLI", async () => {
   expect(signal).toBe("SIGTERM");
   expect(original.code).toBe(1);
   const final = JSON.parse((await run(p.dir, ["workflow", "status", id, "--json"], p.env)).stdout);
-  expect(final.run.status).toBe("failed");
-  expect(final.run.failure.failureCode).toBe("stopped");
+  expect(final.run.status).toBe("cancelled");
+  expect(final.run.failure).toBeUndefined();
   expect(() => process.kill(state.run.childPid, 0)).toThrow();
 }, 30000);
 

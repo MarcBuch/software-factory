@@ -1,9 +1,14 @@
 import { execFile } from "node:child_process";
-import { mkdir, open, readFile, rename, rm, lstat, readdir } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, lstat, readdir, realpath } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { OpenCodeAdapter, type BackendAdapter, type BackendProcess } from "./backend";
+import {
+  OpenCodeAdapter,
+  type BackendAdapter,
+  type BackendProcess,
+  type V2Client,
+} from "./backend";
 import { completeAgent } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
 import { createDraftPlan } from "./plans";
@@ -26,11 +31,15 @@ export type WorkflowLaunch = {
 
 export type WorkflowServiceOptions = {
   adapter?: BackendAdapter;
+  /** Runs after the repository lock is acquired and before a run is persisted. */
+  beforeStart?: () => Promise<void>;
 };
 
 type WorkflowOutcome = Awaited<ReturnType<typeof completeAgent>>;
 type WorkflowFailure = NonNullable<RunRecord["failure"]>;
 type WorkflowLock = { release: () => Promise<void> };
+
+const activeProcesses = new Map<string, BackendProcess>();
 
 async function lockOwner(file: string) {
   try {
@@ -49,7 +58,7 @@ async function processAlive(pid: number) {
   }
 }
 
-async function acquireWorkflowLock(root: string): Promise<WorkflowLock> {
+async function acquireWorkflowLock(root: string, waitForExisting = false): Promise<WorkflowLock> {
   const file = join(root, ".factory", "workflow.lock");
   const token = crypto.randomUUID();
   await mkdir(join(file, ".."), { recursive: true });
@@ -66,7 +75,14 @@ async function acquireWorkflowLock(root: string): Promise<WorkflowLock> {
     } catch (error: any) {
       if (error?.code !== "EEXIST") throw error;
       const owner = await lockOwner(file);
-      if (!owner || (await processAlive(owner.pid))) throw new WorkflowAlreadyRunning();
+      if (!owner || (await processAlive(owner.pid))) {
+        if (waitForExisting) {
+          await Bun.sleep(10);
+          attempt -= 1;
+          continue;
+        }
+        throw new WorkflowAlreadyRunning();
+      }
       try {
         const stale = `${file}.stale.${crypto.randomUUID()}`;
         await rename(file, stale);
@@ -89,6 +105,72 @@ async function processIdentity(pid: number, command: readonly string[]) {
     command: match[2].trim(),
     expected: command.join(" "),
   });
+}
+
+/** Stops a run owned by this server. Service runs are cancelled through the SDK;
+ * persisted service records without a handle are treated as orphaned after restart.
+ * Legacy embedded records retain the same conservative behavior. */
+export async function stopWorkflow(
+  repositoryRoot: string,
+  runId: string,
+  options?: { serviceClient?: V2Client },
+) {
+  const storage = await openWorkflowStorage(repositoryRoot);
+  try {
+    const run = storage.getRun(runId);
+    if (!run) throw Error(`Run not found: ${runId}`);
+    if (run.status !== "running") return run;
+    const processRun = activeProcesses.get(`${resolve(repositoryRoot)}:${runId}`);
+    const service =
+      run.executionKind === "service" ||
+      run.executionKind === "embedded" ||
+      processRun?.executionKind === "service" ||
+      processRun?.executionKind === "embedded";
+    if (!service && processRun) {
+      if (!run.childPid || run.childPid !== processRun.pid || !run.processIdentity)
+        throw Error("Cannot safely stop unverifiable process");
+      const current = await processIdentity(processRun.pid, processRun.command);
+      if (current !== run.processIdentity) throw Error("Stale backend process identity");
+      const cancellation = storage.requestCancellation(runId);
+      if (!cancellation.accepted) return cancellation.run;
+      processRun.cancel();
+      await processRun.exit;
+      return storage.finishRun(runId, "cancelled");
+    }
+    if (!service) throw Error("Cannot safely stop unverifiable process");
+    // A service session outlives this UI process. On restart there is no local
+    // BackendProcess, so use the authenticated client to verify and interrupt
+    // exactly the persisted session; never attempt to resume its workflow.
+    if (run.executionKind === "service" && !processRun) {
+      if (!run.sessionId || !options?.serviceClient) {
+        return storage.failRun(runId, {
+          code: "BACKEND_FAILURE",
+          message:
+            "Cannot safely stop service session: persisted session or service is unavailable",
+        });
+      }
+      const cancellation = storage.requestCancellation(runId);
+      if (!cancellation.accepted) return cancellation.run;
+      try {
+        const active = await options.serviceClient.session.active();
+        if (active && Object.prototype.hasOwnProperty.call(active, run.sessionId))
+          await options.serviceClient.session.interrupt({ sessionID: run.sessionId });
+        return storage.finishRun(runId, "cancelled");
+      } catch (error) {
+        return storage.failRun(runId, {
+          code: "BACKEND_FAILURE",
+          message: `Cannot safely stop service session ${run.sessionId}: ${errorMessage(error)}`,
+        });
+      }
+    }
+    const cancellation = storage.requestCancellation(runId);
+    if (!cancellation.accepted) return cancellation.run;
+    processRun?.cancel();
+    if (processRun) await processRun.exit;
+    return storage.finishRun(runId, "cancelled");
+  } finally {
+    storage.close();
+  }
 }
 
 function workflowFailure(
@@ -115,56 +197,117 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function delegatedExplorer(outcome: WorkflowOutcome) {
+export function delegatedExplorer(outcome: WorkflowOutcome) {
   const starts = new Set<string>();
+  const failed = new Set<string>();
   for (const event of outcome.events) {
     const normalized = event.normalized;
-    if (normalized?.type !== "tool_call" || normalized.tool !== "task" || !normalized.spanId)
-      continue;
+    // V2 currently emits the generic name "tool". It is still safe to
+    // recognize it because the delegation identity is in the tool input,
+    // not in the model's prose (or the generic tool name).
     if (
-      normalized.phase === "start" &&
-      normalized.input &&
-      typeof normalized.input === "object" &&
-      (normalized.input as Record<string, unknown>).subagent_type === "codebase-explorer"
+      normalized?.type !== "tool_call" ||
+      !["task", "tool"].includes(normalized.tool) ||
+      !normalized.spanId
     )
-      starts.add(normalized.spanId);
+      continue;
+    const input =
+      normalized.input && typeof normalized.input === "object"
+        ? (normalized.input as Record<string, unknown>)
+        : undefined;
+    const isExplorerInput =
+      input?.subagent_type === "codebase-explorer" || input?.agent === "codebase-explorer";
+    if (normalized.phase === "start" && isExplorerInput) starts.add(normalized.spanId);
+    if (normalized.phase !== "finish") continue;
+    const output = normalized.output;
     if (
-      normalized.phase === "finish" &&
-      normalized.output &&
-      typeof normalized.output === "object" &&
+      output &&
+      typeof output === "object" &&
+      !Array.isArray(output) &&
+      !["completed", "success"].includes(
+        String((output as Record<string, unknown>).status ?? "").toLowerCase(),
+      )
+    ) {
+      failed.add(normalized.spanId);
+      continue;
+    }
+    const successfulStatus =
+      output &&
+      typeof output === "object" &&
       ["completed", "success"].includes(
-        String((normalized.output as Record<string, unknown>).status ?? "").toLowerCase(),
-      ) &&
-      (starts.has(normalized.spanId) ||
-        (normalized.input &&
-          typeof normalized.input === "object" &&
-          (normalized.input as Record<string, unknown>).subagent_type === "codebase-explorer"))
+        String((output as Record<string, unknown>).status ?? "").toLowerCase(),
+      );
+    // V2 successful subagent results are often text (or text content parts),
+    // while failed results are error objects. A matching start call is the
+    // evidence that ties that result to the requested explorer.
+    const textualResult =
+      typeof output === "string" ||
+      (Array.isArray(output) &&
+        output.some(
+          (part) =>
+            typeof part === "string" ||
+            (part &&
+              typeof part === "object" &&
+              typeof (part as Record<string, unknown>).text === "string"),
+        ));
+    if (
+      (successfulStatus || textualResult) &&
+      starts.has(normalized.spanId) &&
+      !failed.has(normalized.spanId)
     )
       return true;
   }
   return false;
 }
 
-function completedVisualization(outcome: WorkflowOutcome) {
+export function completedVisualization(outcome: WorkflowOutcome) {
+  const started = new Set<string>();
+  const failed = new Set<string>();
   for (const event of outcome.events) {
     const normalized = event.normalized;
-    if (
-      normalized?.type !== "tool_call" ||
-      normalized.tool !== "skill" ||
-      normalized.phase !== "finish" ||
-      !normalized.input ||
-      typeof normalized.input !== "object" ||
-      (normalized.input as Record<string, unknown>).name !== "visualize-change" ||
-      !normalized.output ||
-      typeof normalized.output !== "object"
-    )
+    if (normalized?.type !== "tool_call" || !normalized.spanId) continue;
+    const input =
+      normalized.input && typeof normalized.input === "object"
+        ? (normalized.input as Record<string, unknown>)
+        : undefined;
+    const isVisualization =
+      input?.name === "visualize-change" || input?.skill === "visualize-change";
+    if (normalized.phase === "start") {
+      if (isVisualization && ["skill", "tool"].includes(normalized.tool))
+        started.add(normalized.spanId);
       continue;
+    }
+    if (normalized.phase !== "finish") continue;
+    // A failed or otherwise terminal call can never be rescued by a later
+    // success event with the same id.
+    const output = normalized.output;
+    const status =
+      output && typeof output === "object" && !Array.isArray(output)
+        ? String((output as Record<string, unknown>).status ?? "").toLowerCase()
+        : "";
     if (
-      ["completed", "success"].includes(
-        String((normalized.output as Record<string, unknown>).status ?? "").toLowerCase(),
-      )
-    )
-      return true;
+      status === "failed" ||
+      status === "failure" ||
+      status === "denied" ||
+      status === "error" ||
+      (output !== undefined && typeof output === "object" && !Array.isArray(output) && !status)
+    ) {
+      failed.add(normalized.spanId);
+      continue;
+    }
+    if (!started.has(normalized.spanId) || failed.has(normalized.spanId)) continue;
+    const successfulStatus = ["completed", "success"].includes(status);
+    const textualContent =
+      typeof output === "string" ||
+      (Array.isArray(output) &&
+        output.some(
+          (part) =>
+            typeof part === "string" ||
+            (part &&
+              typeof part === "object" &&
+              typeof (part as Record<string, unknown>).text === "string"),
+        ));
+    if (successfulStatus || textualContent) return true;
   }
   return false;
 }
@@ -305,8 +448,9 @@ async function terminalFailure(
 ) {
   const message = errorMessage(error);
   const failed = storage.failIfRunning(run.id, {
-    code:
-      message.includes("spawn") || message.includes("ENOENT")
+    code: message.includes("Git boundary violation")
+      ? "BOUNDARY_VIOLATION"
+      : message.includes("spawn") || message.includes("ENOENT")
         ? "BACKEND_FAILURE"
         : "WORKFLOW_FAILURE",
     message,
@@ -319,20 +463,52 @@ async function terminalFailure(
   return failed;
 }
 
+async function enforceGitBoundary(
+  boundary: Awaited<ReturnType<typeof captureGitBoundary>>,
+  root: string,
+) {
+  const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
+  if (comparison.equal) return { comparison, failure: undefined, restorationFailure: undefined };
+  const failure = `Git boundary violation: ${JSON.stringify(comparison)}`;
+  try {
+    await restoreGitBoundary(boundary, {
+      repositoryRoot: root,
+      runtimeDirectory: join(root, ".factory"),
+      ...(process.env.FACTORY_TEST_RESTORE_FAILURE
+        ? {
+            restoreFailure: (step: string) => {
+              if (step === process.env.FACTORY_TEST_RESTORE_FAILURE)
+                throw Error(`Injected restoration failure: ${step}`);
+            },
+          }
+        : {}),
+    });
+    return { comparison, failure, restorationFailure: undefined };
+  } catch (error) {
+    return { comparison, failure, restorationFailure: errorMessage(error) };
+  }
+}
+
 export async function startWorkflow(
   repositoryRoot: string,
   input: WorkflowInput,
   options: WorkflowServiceOptions = {},
 ): Promise<WorkflowLaunch> {
-  const root = resolve(repositoryRoot);
+  // Keep one filesystem identity throughout locking, storage, git boundaries,
+  // and backend invocation. resolve() alone preserves macOS /var aliases.
+  const root = await realpath(resolve(repositoryRoot));
   const parsed = WorkflowInputSchema.parse(input);
   const agent = lookupRoster(parsed.agentName);
-  const lock = await acquireWorkflowLock(root);
+  let lock: WorkflowLock;
+  const adapter: BackendAdapter =
+    options.adapter ?? new OpenCodeAdapter({ executable: process.env.FACTORY_OPENCODE_EXECUTABLE });
+  lock = await acquireWorkflowLock(root, adapter.supportsConcurrent === true);
 
   let storage: Awaited<ReturnType<typeof openWorkflowStorage>> | undefined;
   let run: RunRecord | undefined;
   let processStarted = false;
   try {
+    await options.beforeStart?.();
     storage = await openWorkflowStorage(root);
     const boundary = await captureGitBoundary({ repositoryRoot: root });
     const initialFactoryState = await factoryState(root);
@@ -359,11 +535,6 @@ export async function startWorkflow(
 
     let processRun: BackendProcess;
     try {
-      const adapter =
-        options.adapter ??
-        new OpenCodeAdapter({
-          executable: process.env.FACTORY_OPENCODE_EXECUTABLE,
-        });
       processRun = adapter.start({
         repositoryRoot: root,
         runId: run.id,
@@ -374,9 +545,30 @@ export async function startWorkflow(
         tools: agent.allowedTools,
       });
     } catch (error) {
+      // The backend may perform work synchronously while being started (this is
+      // particularly relevant to embedded V2 adapters).  Enforce the same
+      // post-run boundary even when startup fails before completeWorkflow owns
+      // the process.
+      let message = errorMessage(error);
+      try {
+        const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
+        if (!comparison.equal) {
+          message = `BACKEND_FAILURE; Git boundary violation: ${JSON.stringify(comparison)}`;
+          try {
+            await restoreGitBoundary(boundary, {
+              repositoryRoot: root,
+              runtimeDirectory: join(root, ".factory"),
+            });
+          } catch (restoreError) {
+            message += `; Boundary restoration failed: ${errorMessage(restoreError)}`;
+          }
+        }
+      } catch (boundaryError) {
+        message += `; Git boundary check failed: ${errorMessage(boundaryError)}`;
+      }
       const failed = storage.finishRun(run.id, "failed", {
         code: "BACKEND_FAILURE",
-        message: errorMessage(error),
+        message,
       });
       storage.close();
       await lock.release();
@@ -391,8 +583,13 @@ export async function startWorkflow(
     }
     storage.setAgentProcess(run.id, {
       agentName: agent.name,
-      pid: processRun.pid,
-      ...(identity ? { identity } : {}),
+      ...(processRun.executionKind === "service" || processRun.executionKind === "embedded"
+        ? { executionKind: processRun.executionKind }
+        : {
+            pid: processRun.pid,
+            ...(identity ? { identity } : {}),
+            executionKind: "subprocess" as const,
+          }),
     });
     storage.appendTrace({
       runId: run.id,
@@ -401,6 +598,10 @@ export async function startWorkflow(
       agentName: agent.name,
     });
 
+    activeProcesses.set(`${root}:${run.id}`, processRun);
+    // Keep the repository lock until completeWorkflow has finished its boundary
+    // comparison and any restoration. Embedded sessions may share a host, but
+    // mutating workflows in one repository must not overlap their snapshots.
     const completion = completeWorkflow({
       storage,
       run,
@@ -490,8 +691,14 @@ async function completeWorkflow(args: {
         }
         storage.setAgentProcess(run.id, {
           agentName: agent.name,
-          pid: activeProcess.pid,
-          ...(identity ? { identity } : {}),
+          ...(activeProcess.executionKind === "service" ||
+          activeProcess.executionKind === "embedded"
+            ? { executionKind: activeProcess.executionKind }
+            : {
+                pid: activeProcess.pid,
+                ...(identity ? { identity } : {}),
+                executionKind: "subprocess" as const,
+              }),
           sessionId: event.sessionId,
         });
       },
@@ -612,7 +819,12 @@ async function completeWorkflow(args: {
       }
     }
     const current = storage.getRun(run.id);
-    if (current?.status !== "running") return current;
+    if (current?.status !== "running") {
+      // stopWorkflow can mark cancellation before this completion callback observes
+      // the process exit. The callback still owns the snapshot and must restore it.
+      await enforceGitBoundary(boundary, root);
+      return current;
+    }
     const failure = workflowFailure(outcome, boundaryFailure, restorationFailure);
     return storage.finishRun(
       run.id,
@@ -621,6 +833,16 @@ async function completeWorkflow(args: {
     );
   } catch (error) {
     let failure = errorMessage(error);
+    try {
+      const boundaryResult = await enforceGitBoundary(boundary, root);
+      if (boundaryResult.failure) {
+        failure = `${failure}; ${boundaryResult.failure}`;
+        if (boundaryResult.restorationFailure)
+          failure += `; Boundary restoration failed: ${boundaryResult.restorationFailure}`;
+      }
+    } catch (boundaryError) {
+      failure += `; Git boundary check failed: ${errorMessage(boundaryError)}`;
+    }
     if (agent.name === "planner") {
       try {
         if (plannerPostState && !plannerStateRestoreAttempted) {
@@ -634,6 +856,7 @@ async function completeWorkflow(args: {
     } else if (!draftPersisted) await rm(currentArtifact, { force: true }).catch(() => undefined);
     return terminalFailure(storage, run, Error(failure));
   } finally {
+    activeProcesses.delete(`${root}:${run.id}`);
     try {
       storage.clearAgentProcess(run.id);
     } catch {

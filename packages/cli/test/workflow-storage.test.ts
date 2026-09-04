@@ -1,5 +1,6 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +8,12 @@ import { openWorkflowStorage } from "../src/workflow-storage";
 
 async function repo() {
   return mkdtemp(join(tmpdir(), "factory-storage-"));
+}
+
+async function databaseRoot() {
+  const root = await repo();
+  await mkdir(join(root, ".factory"));
+  return root;
 }
 
 test("creates private run artifacts and persists normalized traces", async () => {
@@ -40,6 +47,78 @@ test("creates private run artifacts and persists normalized traces", async () =>
   storage.close();
 });
 
+test("migrates a pre-migration database and can be opened repeatedly", async () => {
+  const root = await databaseRoot();
+  const database = new Database(join(root, ".factory", "workflow.sqlite"));
+  database.exec(`
+    CREATE TABLE runs (
+      id TEXT PRIMARY KEY, repository_root TEXT NOT NULL, status TEXT NOT NULL,
+      started_at TEXT, finished_at TEXT, failure_json TEXT,
+      system_prompt_path TEXT NOT NULL, user_prompt_path TEXT NOT NULL,
+      raw_stream_path TEXT NOT NULL, result_path TEXT NOT NULL, metadata_path TEXT NOT NULL,
+      child_pid INTEGER, session_id TEXT
+    );
+    CREATE TABLE agents (run_id TEXT NOT NULL, agent_name TEXT NOT NULL, started_at TEXT,
+      finished_at TEXT, child_pid INTEGER, session_id TEXT, PRIMARY KEY (run_id, agent_name));
+    CREATE TABLE trace_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+      at TEXT NOT NULL, type TEXT NOT NULL, agent_name TEXT, tool TEXT, status TEXT,
+      payload_json TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER,
+      total_tokens INTEGER, cost_amount REAL, cost_currency TEXT);
+  `);
+  database.close();
+
+  const first = await openWorkflowStorage(root);
+  expect(first.database.query("PRAGMA table_info(runs)").all()).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: "execution_kind" }),
+      expect.objectContaining({ name: "cancellation_requested" }),
+    ]),
+  );
+  first.close();
+  const second = await openWorkflowStorage(root);
+  second.close();
+});
+
+test("migrates a partially migrated database without re-adding columns", async () => {
+  const root = await databaseRoot();
+  const database = new Database(join(root, ".factory", "workflow.sqlite"));
+  database.exec(`
+    CREATE TABLE runs (id TEXT PRIMARY KEY, repository_root TEXT NOT NULL, status TEXT NOT NULL,
+      started_at TEXT, finished_at TEXT, failure_json TEXT, system_prompt_path TEXT NOT NULL,
+      user_prompt_path TEXT NOT NULL, raw_stream_path TEXT NOT NULL, result_path TEXT NOT NULL,
+      metadata_path TEXT NOT NULL, child_pid INTEGER, session_id TEXT,
+      process_identity TEXT, execution_kind TEXT);
+    CREATE TABLE trace_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+      at TEXT NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL);
+    PRAGMA user_version = 1;
+  `);
+  database.close();
+  const storage = await openWorkflowStorage(root);
+  expect(
+    storage.database
+      .query<{ name: string }, []>("PRAGMA table_info(runs)")
+      .all()
+      .map((column) => column.name),
+  ).toContain("cancellation_requested");
+  storage.close();
+});
+
+test("rejects unknown persisted execution kinds", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.database.query("UPDATE runs SET execution_kind='unknown' WHERE id=?").run(run.id);
+  expect(() => storage.getRun(run.id)).toThrow("Unknown persisted execution kind");
+  storage.close();
+});
+
+test("propagates migration failures instead of treating them as already migrated", async () => {
+  const root = await databaseRoot();
+  const database = new Database(join(root, ".factory", "workflow.sqlite"));
+  database.exec("CREATE VIEW runs AS SELECT 1 AS id; PRAGMA user_version = 1;");
+  database.close();
+  await expect(openWorkflowStorage(root)).rejects.toThrow();
+});
+
 test("guards lifecycle transitions and validates terminal failures", async () => {
   const storage = await openWorkflowStorage(await repo());
   const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
@@ -48,8 +127,41 @@ test("guards lifecycle transitions and validates terminal failures", async () =>
   expect(() => storage.startRun(run.id)).toThrow();
   expect(() => storage.finishRun(run.id, "failed")).toThrow();
   storage.finishRun(run.id, "succeeded");
-  expect(() => storage.finishRun(run.id, "cancelled")).toThrow();
+  expect(storage.finishRun(run.id, "cancelled")?.status).toBe("succeeded");
   expect(storage.trace(run.id).filter((x) => x.type === "run_started")).toHaveLength(1);
+  storage.close();
+});
+
+test("serializes cancellation requests against success and failure completion", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const makeRunning = async () => {
+    const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+    storage.startRun(run.id);
+    return run;
+  };
+
+  const successAfterStop = await makeRunning();
+  expect(storage.requestCancellation(successAfterStop.id).accepted).toBe(true);
+  expect(storage.finishRun(successAfterStop.id, "succeeded")?.status).toBe("cancelled");
+  expect(storage.requestCancellation(successAfterStop.id).accepted).toBe(false);
+
+  const failureAfterStop = await makeRunning();
+  expect(storage.requestCancellation(failureAfterStop.id).accepted).toBe(true);
+  expect(
+    storage.finishRun(failureAfterStop.id, "failed", { code: "BACKEND_FAILURE", message: "x" })
+      ?.status,
+  ).toBe("cancelled");
+
+  const successBeforeStop = await makeRunning();
+  expect(storage.finishRun(successBeforeStop.id, "succeeded")?.status).toBe("succeeded");
+  expect(storage.requestCancellation(successBeforeStop.id).accepted).toBe(false);
+
+  const failureBeforeStop = await makeRunning();
+  expect(
+    storage.finishRun(failureBeforeStop.id, "failed", { code: "BACKEND_FAILURE", message: "x" })
+      ?.status,
+  ).toBe("failed");
+  expect(storage.requestCancellation(failureBeforeStop.id).accepted).toBe(false);
   storage.close();
 });
 
@@ -72,6 +184,36 @@ test("updates pid and backend session and cleans partial artifacts", async () =>
   expect(
     (await Bun.$`ls -1 ${join(root, ".factory", "runs")}`.text()).trim().split("\n"),
   ).toHaveLength(1);
+  storage.close();
+});
+
+test("persists service execution identity without inventing a child PID", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.setAgentProcess(run.id, {
+    agentName: "builder",
+    executionKind: "service",
+    sessionId: "v2-session",
+    pid: 0,
+    identity: "must-not-persist",
+  });
+  expect(storage.getRun(run.id)).toMatchObject({
+    executionKind: "service",
+    sessionId: "v2-session",
+  });
+  expect(storage.getRun(run.id)?.childPid).toBeUndefined();
+  expect(storage.getRun(run.id)?.processIdentity).toBeUndefined();
+  storage.close();
+});
+
+test("reads legacy embedded execution identity without rewriting the SQLite row", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.database.query("UPDATE runs SET execution_kind='embedded' WHERE id=?").run(run.id);
+  expect(storage.getRun(run.id)).toMatchObject({ executionKind: "embedded" });
+  expect(storage.database.query("SELECT execution_kind FROM runs WHERE id=?").get(run.id)).toEqual({
+    execution_kind: "embedded",
+  });
   storage.close();
 });
 

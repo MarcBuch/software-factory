@@ -31,6 +31,10 @@ export type RunRecord = Omit<Run, "metadata"> & {
   childPid?: number;
   sessionId?: string;
   processIdentity?: string;
+  /** `embedded` is retained solely for compatibility with legacy SQLite rows. */
+  executionKind?: "subprocess" | "service" | "embedded";
+  /** Internal terminal-transition request, not part of the public run contract. */
+  cancellationRequested?: boolean;
   /** Metadata captured at creation time (request/agent are included by the CLI). */
   metadata?: unknown;
 };
@@ -66,7 +70,12 @@ export type RunInit = {
   metadata?: unknown;
 };
 
-export type AgentProcess = { agentName: string; pid?: number; sessionId?: string };
+export type AgentProcess = {
+  agentName: string;
+  pid?: number;
+  sessionId?: string;
+  executionKind?: "subprocess" | "service" | "embedded";
+};
 
 function runId() {
   return `run_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -120,8 +129,9 @@ export class WorkflowStorage {
             id TEXT PRIMARY KEY, repository_root TEXT NOT NULL, status TEXT NOT NULL,
             started_at TEXT, finished_at TEXT, failure_json TEXT,
             system_prompt_path TEXT NOT NULL, user_prompt_path TEXT NOT NULL,
-            raw_stream_path TEXT NOT NULL, result_path TEXT NOT NULL, metadata_path TEXT NOT NULL,
-            child_pid INTEGER, session_id TEXT, process_identity TEXT
+             raw_stream_path TEXT NOT NULL, result_path TEXT NOT NULL, metadata_path TEXT NOT NULL,
+             child_pid INTEGER, session_id TEXT, process_identity TEXT, execution_kind TEXT,
+             cancellation_requested INTEGER NOT NULL DEFAULT 0
           );
           CREATE TABLE IF NOT EXISTS agents (
             run_id TEXT NOT NULL, agent_name TEXT NOT NULL, started_at TEXT, finished_at TEXT,
@@ -142,17 +152,23 @@ export class WorkflowStorage {
         `);
       })();
     }
-    try {
-      this.database.exec("ALTER TABLE runs ADD COLUMN process_identity TEXT");
-    } catch {
-      /* already present */
-    }
+    this.addColumnIfMissing("runs", "process_identity", "process_identity TEXT");
+    this.addColumnIfMissing("runs", "execution_kind", "execution_kind TEXT");
+    this.addColumnIfMissing(
+      "runs",
+      "cancellation_requested",
+      "cancellation_requested INTEGER NOT NULL DEFAULT 0",
+    );
     for (const column of ["reasoning_tokens", "cache_read_tokens", "cache_write_tokens"]) {
-      try {
-        this.database.exec(`ALTER TABLE trace_events ADD COLUMN ${column} INTEGER`);
-      } catch {
-        /* already present */
-      }
+      this.addColumnIfMissing("trace_events", column, `${column} INTEGER`);
+    }
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string) {
+    const columns = this.database.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+    if (!columns.some((entry) => entry.name === column)) {
+      // Do not catch this: a malformed/incompatible database must prevent startup.
+      this.database.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
     }
   }
 
@@ -212,26 +228,45 @@ export class WorkflowStorage {
     failure?: Run["failure"],
     at = iso(),
   ) {
-    const current = this.getRun(id);
-    if (!current || !current.startedAt) throw Error(`Cannot finish run: ${id}`);
-    const candidate = {
-      id,
-      status,
-      startedAt: current.startedAt,
-      finishedAt: at,
-      ...(failure ? { failure } : {}),
-    };
-    RunSchema.parse(candidate);
+    let finished: RunRecord | undefined;
     this.database.transaction(() => {
+      const current = this.getRun(id);
+      if (!current || !current.startedAt) throw Error(`Cannot finish run: ${id}`);
+      if (current.status !== "running") {
+        finished = current;
+        return;
+      }
+      const finalStatus = current.cancellationRequested ? "cancelled" : status;
+      const finalFailure = finalStatus === "cancelled" ? undefined : failure;
+      RunSchema.parse({
+        id,
+        status: finalStatus,
+        startedAt: current.startedAt,
+        finishedAt: at,
+        ...(finalFailure ? { failure: finalFailure } : {}),
+      });
       const result = this.database
         .query(
           "UPDATE runs SET status=?, finished_at=?, failure_json=? WHERE id=? AND status='running'",
         )
-        .run(status, at, failure ? JSON.stringify(failure) : null, id);
-      if (result.changes !== 1) throw Error(`Cannot finish run: ${id}`);
-      this.appendTrace({ runId: id, at, type: "run_finished", status });
+        .run(finalStatus, at, finalFailure ? JSON.stringify(finalFailure) : null, id);
+      if (result.changes !== 1) {
+        finished = this.getRun(id);
+        if (finished?.status === "running") throw Error(`Cannot finish run: ${id}`);
+        return;
+      }
+      this.appendTrace({ runId: id, at, type: "run_finished", status: finalStatus });
+      finished = this.getRun(id);
     })();
-    return this.getRun(id);
+    return finished;
+  }
+
+  /** Atomically records cancellation ownership while the run is still running. */
+  requestCancellation(id: string) {
+    const result = this.database
+      .query("UPDATE runs SET cancellation_requested=1 WHERE id=? AND status='running'")
+      .run(id);
+    return { accepted: result.changes === 1, run: this.getRun(id) };
   }
 
   setAgentProcess(runId: string, processInfo: AgentProcess & { identity?: string }) {
@@ -239,10 +274,30 @@ export class WorkflowStorage {
     this.database
       .query(`INSERT INTO agents(run_id, agent_name, child_pid, session_id, started_at)
       VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, agent_name) DO UPDATE SET child_pid=excluded.child_pid, session_id=excluded.session_id`)
-      .run(runId, processInfo.agentName, processInfo.pid ?? null, sessionId ?? null, iso());
+      .run(
+        runId,
+        processInfo.agentName,
+        processInfo.executionKind === "service" || processInfo.executionKind === "embedded"
+          ? null
+          : (processInfo.pid ?? null),
+        sessionId ?? null,
+        iso(),
+      );
     this.database
-      .query("UPDATE runs SET child_pid=?, session_id=?, process_identity=? WHERE id=?")
-      .run(processInfo.pid ?? null, sessionId ?? null, processInfo.identity ?? null, runId);
+      .query(
+        "UPDATE runs SET child_pid=?, session_id=?, process_identity=?, execution_kind=? WHERE id=?",
+      )
+      .run(
+        processInfo.executionKind === "service" || processInfo.executionKind === "embedded"
+          ? null
+          : (processInfo.pid ?? null),
+        sessionId ?? null,
+        processInfo.executionKind === "service" || processInfo.executionKind === "embedded"
+          ? null
+          : (processInfo.identity ?? null),
+        processInfo.executionKind ?? (processInfo.pid ? "subprocess" : null),
+        runId,
+      );
   }
 
   clearAgentProcess(runId: string) {
@@ -259,6 +314,31 @@ export class WorkflowStorage {
     } catch {
       return this.getRun(runId);
     }
+  }
+
+  /** Atomically orphan a run when its remote execution cannot be safely stopped. */
+  failRun(runId: string, failure: Run["failure"], at = iso()) {
+    let failed: RunRecord | undefined;
+    this.database.transaction(() => {
+      const current = this.getRun(runId);
+      if (!current || !current.startedAt) throw Error(`Cannot fail run: ${runId}`);
+      if (current.status !== "running") {
+        failed = current;
+        return;
+      }
+      const result = this.database
+        .query(
+          "UPDATE runs SET status='failed', finished_at=?, failure_json=?, cancellation_requested=0 WHERE id=? AND status='running'",
+        )
+        .run(at, JSON.stringify(failure), runId);
+      if (result.changes !== 1) {
+        failed = this.getRun(runId);
+        return;
+      }
+      this.appendTrace({ runId, at, type: "run_finished", status: "failed" });
+      failed = this.getRun(runId);
+    })();
+    return failed;
   }
 
   appendTrace(event: TraceEvent) {
@@ -328,6 +408,20 @@ export class WorkflowStorage {
     } catch {
       /* Metadata is supplementary; a missing/corrupt file must not hide a run. */
     }
+    let executionKind: "subprocess" | "service" | "embedded" | undefined;
+    if (row.execution_kind !== null && row.execution_kind !== undefined) {
+      if (
+        row.execution_kind !== "subprocess" &&
+        row.execution_kind !== "service" &&
+        row.execution_kind !== "embedded"
+      ) {
+        throw Error(`Unknown persisted execution kind: ${String(row.execution_kind)}`);
+      }
+      executionKind = row.execution_kind;
+    } else if (row.child_pid) {
+      // Legacy rows predate execution_kind; a persisted child PID is evidence of a subprocess.
+      executionKind = "subprocess";
+    }
     const run: RunRecord = {
       id: row.id,
       status: row.status,
@@ -346,6 +440,8 @@ export class WorkflowStorage {
       ...(row.child_pid ? { childPid: row.child_pid } : {}),
       ...(row.session_id ? { sessionId: row.session_id } : {}),
       ...(row.process_identity ? { processIdentity: row.process_identity } : {}),
+      ...(executionKind ? { executionKind } : {}),
+      ...(row.cancellation_requested ? { cancellationRequested: true } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
     };
     return run;
