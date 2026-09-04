@@ -7,9 +7,19 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { BackendAdapter } from "../src/backend";
-import { startWorkflow } from "../src/workflow-service";
+import { lookupRegistry } from "../src/roster";
+import { startWorkflow, validateRuntimeRequirements } from "../src/workflow-service";
 
 const execFile = promisify(nodeExecFile);
+
+test("rejects an adapter that lacks a required runtime capability", () => {
+  expect(() =>
+    validateRuntimeRequirements(lookupRegistry("planner"), {
+      id: "read-only-fake",
+      capabilities: ["repository.read"],
+    }),
+  ).toThrow("missing capabilities: repository.write");
+});
 
 async function repository() {
   const root = await mkdtemp(join(tmpdir(), "factory-embedded-boundary-"));
@@ -28,6 +38,8 @@ test("embedded startup failure restores writes made before backend failure", asy
   const root = await repository();
   try {
     const adapter: BackendAdapter = {
+      id: "fake-boundary",
+      capabilities: ["repository.read"],
       supportsConcurrent: true,
       start() {
         // Model this as an embedded SDK host doing synchronous setup before
@@ -59,6 +71,8 @@ test("embedded workflows in one repository serialize boundary restoration", asyn
     let starts = 0;
     let secondStartSawPreviousWrite: boolean | undefined;
     const adapter: BackendAdapter = {
+      id: "fake-boundary",
+      capabilities: ["repository.read"],
       supportsConcurrent: true,
       start() {
         starts += 1;

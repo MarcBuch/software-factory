@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { EffectiveRunDefinition } from "../src/workflow";
 import { openWorkflowStorage } from "../src/workflow-storage";
 
 async function repo() {
@@ -15,6 +16,46 @@ async function databaseRoot() {
   await mkdir(join(root, ".factory"));
   return root;
 }
+
+const definition: EffectiveRunDefinition = {
+  schemaVersion: 1,
+  agent: { id: "builder", version: 1, provenance: "builtin" },
+  workflow: { id: "workflow", version: 1, agent: "builder", provenance: "builtin" },
+  runtime: { id: "opencode", adapterId: "opencode-cli-v1", capabilities: [], model: "model" },
+  completionContract: "factory-result-json-v1",
+  policy: { capabilities: [], writeBoundary: ["src"] },
+};
+
+test("definition writes once, is schema-shaped, and excludes secrets and request text", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({
+    systemPrompt: "SYSTEM-CREDENTIAL-123",
+    userPrompt: "USER-REQUEST-456",
+  });
+  await storage.writeDefinition(run.id, definition);
+  const persisted = JSON.parse(await readFile(run.files.definition, "utf8"));
+  const allowed: Record<string, string[]> = {
+    root: ["schemaVersion", "agent", "workflow", "runtime", "completionContract", "policy"],
+    agent: ["id", "version", "provenance"],
+    workflow: ["id", "version", "agent", "provenance"],
+    runtime: ["id", "adapterId", "capabilities", "model", "profile"],
+    policy: ["capabilities", "writeBoundary"],
+  };
+  const visit = (value: unknown, kind = "root"): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    for (const key of Object.keys(value)) {
+      expect(allowed[kind] ?? []).toContain(key);
+      visit((value as Record<string, unknown>)[key], key);
+    }
+  };
+  visit(persisted);
+  const serialized = JSON.stringify(persisted);
+  expect(serialized).not.toContain("SYSTEM-CREDENTIAL-123");
+  expect(serialized).not.toContain("USER-REQUEST-456");
+  expect(serialized).not.toContain("credential");
+  await expect(storage.writeDefinition(run.id, definition)).rejects.toThrow("already exists");
+  storage.close();
+});
 
 test("creates private run artifacts and persists normalized traces", async () => {
   const root = await repo();

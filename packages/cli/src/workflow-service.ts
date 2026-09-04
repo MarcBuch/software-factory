@@ -3,16 +3,12 @@ import { mkdir, open, readFile, rename, rm, lstat, readdir, realpath } from "nod
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import {
-  OpenCodeAdapter,
-  type BackendAdapter,
-  type BackendProcess,
-  type V2Client,
-} from "./backend";
+import type { AgentRuntimeAdapter, BackendProcess } from "./agent-runtime";
+import { OpenCodeAdapter, type V2Client } from "./backend";
 import { completeAgent } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
 import { createDraftPlan } from "./plans";
-import { lookupRoster, renderAgentPrompts } from "./roster";
+import { lookupRegistry, lookupRoster, renderAgentPrompts } from "./roster";
 import { recoverFactoryTransaction, replaceFactoryPair, withFactoryLock } from "./storage";
 import { WorkflowInputSchema, type WorkflowInput } from "./workflow";
 import { openWorkflowStorage, type RunRecord } from "./workflow-storage";
@@ -30,10 +26,23 @@ export type WorkflowLaunch = {
 };
 
 export type WorkflowServiceOptions = {
-  adapter?: BackendAdapter;
+  adapter?: AgentRuntimeAdapter;
   /** Runs after the repository lock is acquired and before a run is persisted. */
   beforeStart?: () => Promise<void>;
 };
+
+export function validateRuntimeRequirements(
+  agent: ReturnType<typeof lookupRegistry>,
+  adapter: Pick<AgentRuntimeAdapter, "capabilities" | "id">,
+) {
+  const required = agent.runtime.capabilities;
+  const available = new Set(adapter.capabilities);
+  const missing = required.filter((capability) => !available.has(capability));
+  if (missing.length)
+    throw new Error(
+      `Adapter ${adapter.id ?? "unknown"} cannot run agent ${agent.agent.name}; missing capabilities: ${missing.join(", ")}`,
+    );
+}
 
 type WorkflowOutcome = Awaited<ReturnType<typeof completeAgent>>;
 type WorkflowFailure = NonNullable<RunRecord["failure"]>;
@@ -217,7 +226,7 @@ export function delegatedExplorer(outcome: WorkflowOutcome) {
         : undefined;
     const isExplorerInput =
       input?.subagent_type === "codebase-explorer" || input?.agent === "codebase-explorer";
-    if (normalized.phase === "start" && isExplorerInput) starts.add(normalized.spanId);
+    if (isExplorerInput) starts.add(normalized.spanId);
     if (normalized.phase !== "finish") continue;
     const output = normalized.output;
     if (
@@ -278,6 +287,11 @@ export function completedVisualization(outcome: WorkflowOutcome) {
       continue;
     }
     if (normalized.phase !== "finish") continue;
+    // V1 emits a completed tool_use as one event, carrying both its input and
+    // output. Treat that event as the paired start/finish without accepting
+    // completion text that was not tied to a requested skill call.
+    if (isVisualization && ["skill", "tool"].includes(normalized.tool))
+      started.add(normalized.spanId);
     // A failed or otherwise terminal call can never be rescued by a later
     // success event with the same id.
     const output = normalized.output;
@@ -498,10 +512,12 @@ export async function startWorkflow(
   // and backend invocation. resolve() alone preserves macOS /var aliases.
   const root = await realpath(resolve(repositoryRoot));
   const parsed = WorkflowInputSchema.parse(input);
-  const agent = lookupRoster(parsed.agentName);
+  const registry = lookupRegistry(parsed.agentName);
+  const agent = registry.agent;
   let lock: WorkflowLock;
-  const adapter: BackendAdapter =
+  const adapter: AgentRuntimeAdapter =
     options.adapter ?? new OpenCodeAdapter({ executable: process.env.FACTORY_OPENCODE_EXECUTABLE });
+  validateRuntimeRequirements(registry, adapter);
   lock = await acquireWorkflowLock(root, adapter.supportsConcurrent === true);
 
   let storage: Awaited<ReturnType<typeof openWorkflowStorage>> | undefined;
@@ -530,6 +546,22 @@ export async function startWorkflow(
     });
     await Bun.write(run.files.systemPrompt, prompts.systemPrompt);
     await Bun.write(run.files.userPrompt, prompts.userPrompt);
+    await storage.writeDefinition(run.id, {
+      schemaVersion: 1,
+      agent: { id: agent.name, version: registry.workflow.version, provenance: "builtin" },
+      workflow: registry.workflow,
+      runtime: {
+        ...registry.runtime,
+        id: registry.runtime.id,
+        adapterId: adapter.id,
+        capabilities: adapter.capabilities,
+      },
+      policy: {
+        capabilities: registry.runtime.capabilities,
+        writeBoundary: agent.writeBoundary,
+      },
+      completionContract: registry.completionContract,
+    });
     run = storage.startRun(run.id)!;
     processStarted = true;
 
@@ -538,11 +570,19 @@ export async function startWorkflow(
       processRun = adapter.start({
         repositoryRoot: root,
         runId: run.id,
-        agent,
+        agent: {
+          id: agent.name,
+          systemPrompt: prompts.systemPrompt,
+          userPrompt: prompts.userPrompt,
+          model: registry.runtime.model ?? agent.model,
+          capabilities: registry.runtime.capabilities,
+          writeBoundary: agent.writeBoundary,
+          completionContract: registry.completionContract,
+          adapterProfile: registry.runtime.profile,
+        },
         prompt: prompts.userPrompt,
         systemPrompt: prompts.systemPrompt,
-        model: agent.model,
-        tools: agent.allowedTools,
+        model: registry.runtime.model ?? agent.model,
       });
     } catch (error) {
       // The backend may perform work synchronously while being started (this is
@@ -660,14 +700,23 @@ async function completeWorkflow(args: {
   try {
     if (agent.name === "planner" && (await lstat(currentArtifact).catch(() => undefined)))
       throw Error("Planner architecture artifact must not pre-exist");
+    const runtime = lookupRegistry(agent.name).runtime;
     const invocation = {
       repositoryRoot: root,
       runId: run.id,
-      agent,
+      agent: {
+        id: agent.name,
+        systemPrompt: prompts.systemPrompt,
+        userPrompt: prompts.userPrompt,
+        model: runtime.model ?? agent.model,
+        capabilities: runtime.capabilities,
+        writeBoundary: agent.writeBoundary,
+        completionContract: lookupRegistry(agent.name).completionContract,
+        adapterProfile: runtime.profile,
+      },
       prompt: prompts.userPrompt,
       systemPrompt: prompts.systemPrompt,
-      model: agent.model,
-      tools: agent.allowedTools,
+      model: runtime.model ?? agent.model,
     };
     let watching = true;
     const watcher = (async () => {
@@ -699,7 +748,9 @@ async function completeWorkflow(args: {
                 ...(identity ? { identity } : {}),
                 executionKind: "subprocess" as const,
               }),
-          sessionId: event.sessionId,
+          // Storage keeps its legacy column for migration compatibility; the
+          // backend seam itself remains provider-neutral.
+          sessionId: event.executionId,
         });
       },
     );

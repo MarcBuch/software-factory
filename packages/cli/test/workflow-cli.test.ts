@@ -174,6 +174,17 @@ test("workflow CLI invokes the planner roster entry", async () => {
   expect(await readFile(log, "utf8")).toContain("--agent plan-mission");
   expect(await readFile(log, "utf8")).toContain("Do not approve, materialize, revise, archive");
   const output = JSON.parse(result.stdout).result;
+  const runId = JSON.parse(result.stdout).run.id;
+  const definition = JSON.parse(
+    await readFile(join(p.dir, ".factory", "runs", runId, "definition.json"), "utf8"),
+  );
+  expect(definition.runtime).toMatchObject({
+    id: "opencode",
+    adapterId: "opencode-cli-v1",
+    capabilities: ["repository.read", "repository.write", "workflow.delegate", "workflow.skill"],
+  });
+  expect(JSON.stringify(definition)).not.toContain("plan it");
+  expect(JSON.stringify(definition)).not.toContain("systemPrompt");
   expect(output.summary).toContain("Mission Plan");
   expect(output.summary).toMatch(/Draft plan: pln_[A-Za-z0-9]+/);
   expect(output.notes).toContainEqual(expect.stringMatching(/^Created draft plan pln_/));
@@ -191,6 +202,9 @@ test("workflow CLI invokes the planner roster entry", async () => {
     "<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Authored bytes &amp; preserved</p></body></html>",
   );
   expect(await Bun.file(join(p.dir, ".factory", "missions.jsonl")).exists()).toBe(false);
+  expect(
+    JSON.parse(await readFile(join(p.dir, ".factory", "runs", runId, "definition.json"), "utf8")),
+  ).toEqual(definition);
 });
 
 test("planner restore rejects a mutation after its post-state snapshot", async () => {

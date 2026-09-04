@@ -10,7 +10,11 @@ import {
   type TraceEvent,
 } from "@software-factory/contracts";
 
-import type { AgentResult } from "./workflow";
+import {
+  EffectiveRunDefinitionSchema,
+  type AgentResult,
+  type EffectiveRunDefinition,
+} from "./workflow";
 
 const mode = 0o600;
 const privateMode = 0o700;
@@ -23,6 +27,7 @@ export type RunFiles = {
   rawStream: string;
   result: string;
   metadata: string;
+  definition: string;
 };
 
 export type RunRecord = Omit<Run, "metadata"> & {
@@ -185,6 +190,7 @@ export class WorkflowStorage {
         rawStream: join(directory, "stream.jsonl"),
         result: join(directory, "result.json"),
         metadata: join(directory, "metadata.json"),
+        definition: join(directory, "definition.json"),
       };
       await atomic(files.systemPrompt, input.systemPrompt);
       await atomic(files.userPrompt, input.userPrompt);
@@ -209,6 +215,17 @@ export class WorkflowStorage {
       await rm(directory, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  async writeDefinition(runId: string, definition: EffectiveRunDefinition) {
+    const run = this.getRun(runId);
+    if (!run) throw new Error(`Run not found: ${runId}`);
+    if (await Bun.file(run.files.definition).exists())
+      throw new Error(`Effective definition already exists for run: ${runId}`);
+    await atomic(
+      run.files.definition,
+      JSON.stringify(EffectiveRunDefinitionSchema.parse(definition), null, 2) + "\n",
+    );
   }
 
   startRun(id: string, at = iso()) {
@@ -433,6 +450,7 @@ export class WorkflowStorage {
         rawStream: row.raw_stream_path,
         result: row.result_path,
         metadata: row.metadata_path,
+        definition: join(this.factoryDirectory, "runs", row.id, "definition.json"),
       },
       ...(row.started_at ? { startedAt: row.started_at } : {}),
       ...(row.finished_at ? { finishedAt: row.finished_at } : {}),
