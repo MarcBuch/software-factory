@@ -32,6 +32,7 @@ retry, or hand off work.`;
 
 export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "scout",
+  opencodeAgent: "scout",
   purpose: "Inspect a repository and report relevant findings without changing it",
   model: "github-copilot/gpt-5.6-luna",
   systemPrompt: `You are the read-only scout for Software Factory. Inspect the repository to answer the request, prioritizing accurate, concise evidence. You may use only the tools listed by the workflow. The write boundary is post-run enforced by the workflow; it is not a preventative tool restriction, so do not claim that tools themselves prevent writes. ${RESULT_INSTRUCTIONS}`,
