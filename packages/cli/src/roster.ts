@@ -1,3 +1,5 @@
+import type { AgentCapability } from "@software-factory/contracts";
+
 import { AgentResultSchema, AgentRosterEntrySchema, type AgentRosterEntry } from "./workflow";
 
 /** Shared wire protocol for the final agent response. Markers must occupy lines by themselves. */
@@ -30,8 +32,9 @@ Put the complete readable plan in summary. The workflow creates one draft and ap
 Do not approve, materialize, revise, archive, create missions, run commands or tests, make commits,
 retry, or hand off work.`;
 
-export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
+const scoutDefinition: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "scout",
+  version: 1,
   opencodeAgent: "scout",
   purpose: "Inspect a repository and report relevant findings without changing it",
   model: "github-copilot/gpt-5.6-luna",
@@ -40,10 +43,12 @@ export const SCOUT_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse
   // Read tools are the intended capability; post-run boundary enforcement remains authoritative.
   allowedTools: ["read", "glob", "grep"],
   writeBoundary: [],
+  capabilities: ["repository.read"],
 });
 
-export const PLANNER_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.parse({
+const plannerDefinition: AgentRosterEntry = AgentRosterEntrySchema.parse({
   name: "planner",
+  version: 1,
   opencodeAgent: "plan-mission",
   purpose: "Explore a repository and create exactly one draft mission plan",
   model: "github-copilot/gpt-5.6-terra",
@@ -51,12 +56,81 @@ export const PLANNER_ROSTER_ENTRY: AgentRosterEntry = AgentRosterEntrySchema.par
   userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nExplore first, load visualize-change, write the exact expectedArtifactPath, then return the complete plan, notes, and one artifact declaration.`,
   allowedTools: ["task", "skill", "read", "glob", "grep", "edit"],
   writeBoundary: [".factory/architecture"],
+  capabilities: ["repository.read", "repository.write", "workflow.delegate", "workflow.skill"],
 });
 
-export const BUILTIN_ROSTER: readonly AgentRosterEntry[] = Object.freeze([
-  SCOUT_ROSTER_ENTRY,
-  PLANNER_ROSTER_ENTRY,
+export type BuiltinRegistryEntry = Readonly<{
+  agent: AgentRosterEntry;
+  workflow: { id: string; version: number; agent: string; provenance: "builtin" };
+  runtime: {
+    id: string;
+    capabilities: readonly AgentCapability[];
+    model?: string;
+    profile?: Readonly<Record<string, unknown>>;
+  };
+  completionContract: "factory-result-json-v1";
+  ui: { label: string; description: string; placeholder: string; detail: string };
+}>;
+
+export const BUILTIN_REGISTRY: readonly BuiltinRegistryEntry[] = Object.freeze([
+  {
+    agent: scoutDefinition,
+    workflow: { id: "repository-scout", version: 1, agent: "scout", provenance: "builtin" },
+    runtime: {
+      id: "opencode",
+      capabilities: scoutDefinition.capabilities ?? ["repository.read"],
+      model: scoutDefinition.model,
+      profile: { opencodeAgent: scoutDefinition.opencodeAgent },
+    },
+    completionContract: "factory-result-json-v1",
+    ui: {
+      label: "Scout",
+      description: scoutDefinition.purpose,
+      placeholder: "What should the scout inspect?",
+      detail: "READ-ONLY RESEARCH",
+    },
+  },
+  {
+    agent: plannerDefinition,
+    workflow: { id: "mission-planner", version: 1, agent: "planner", provenance: "builtin" },
+    runtime: {
+      id: "opencode",
+      capabilities: plannerDefinition.capabilities ?? [
+        "repository.read",
+        "repository.write",
+        "workflow.delegate",
+        "workflow.skill",
+      ],
+      model: plannerDefinition.model,
+      profile: { opencodeAgent: plannerDefinition.opencodeAgent },
+    },
+    completionContract: "factory-result-json-v1",
+    ui: {
+      label: "Planner",
+      description: plannerDefinition.purpose,
+      placeholder: "What should the planner prepare?",
+      detail: "RESEARCH + MISSION PLAN",
+    },
+  },
 ]);
+
+/** Compatibility views; the registry above is the only production authority. */
+export const BUILTIN_ROSTER: readonly AgentRosterEntry[] = Object.freeze(
+  BUILTIN_REGISTRY.map((entry) => entry.agent),
+);
+const rosterEntry = (name: string): AgentRosterEntry => {
+  const entry = BUILTIN_ROSTER.find((candidate) => candidate.name === name);
+  if (!entry) throw new Error(`Missing builtin roster entry: ${name}`);
+  return entry;
+};
+export const SCOUT_ROSTER_ENTRY = rosterEntry("scout");
+export const PLANNER_ROSTER_ENTRY = rosterEntry("planner");
+export const BUILTIN_WORKFLOWS = Object.freeze(
+  Object.fromEntries(BUILTIN_REGISTRY.map((entry) => [entry.agent.name, entry.workflow])) as {
+    scout: BuiltinRegistryEntry["workflow"];
+    planner: BuiltinRegistryEntry["workflow"];
+  },
+);
 
 export type RunPromptContext = Readonly<Record<string, unknown>>;
 export type RenderedAgentPrompts = Readonly<{
@@ -66,7 +140,13 @@ export type RenderedAgentPrompts = Readonly<{
 }>;
 
 export function getRosterEntry(name: string): AgentRosterEntry | undefined {
-  return BUILTIN_ROSTER.find((entry) => entry.name === name);
+  return BUILTIN_REGISTRY.find((entry) => entry.agent.name === name)?.agent;
+}
+
+export function lookupRegistry(name: string): BuiltinRegistryEntry {
+  const entry = BUILTIN_REGISTRY.find((candidate) => candidate.agent.name === name);
+  if (!entry) throw new Error(`Unknown agent: ${name}`);
+  return entry;
 }
 
 export function lookupRoster(name: string): AgentRosterEntry {

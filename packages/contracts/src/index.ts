@@ -283,9 +283,7 @@ export const TracePageSchema = z
     publicRun: RunSchema.optional(),
   })
   .strict();
-export const LaunchRequestSchema = z
-  .object({ request: text, agentName: z.enum(["scout", "planner"]) })
-  .strict();
+export const LaunchRequestSchema = z.object({ request: text, agentName: text }).strict();
 export const LaunchResponseSchema = z
   .object({ accepted: z.literal(true), run: RunSchema })
   .strict();
@@ -299,8 +297,33 @@ export const DeletePlanResponseSchema = z
   })
   .strict();
 
+export const AgentCapabilitySchema = z.enum([
+  "repository.read",
+  "repository.write",
+  "workflow.delegate",
+  "workflow.skill",
+]);
+export const AgentSummarySchema = z
+  .object({
+    id: text,
+    version: z.number().int().positive(),
+    purpose: text,
+    model: text,
+    capabilities: z.array(AgentCapabilitySchema),
+    writeBoundary: z.array(text),
+    label: text,
+    description: text,
+    placeholder: text,
+    detail: text,
+  })
+  .strict();
+export const AgentsResponseSchema = z.object({ agents: z.array(AgentSummarySchema) }).strict();
+
 export type Run = z.infer<typeof RunSchema>;
 export type DeletePlanResponse = z.infer<typeof DeletePlanResponseSchema>;
+export type AgentCapability = z.infer<typeof AgentCapabilitySchema>;
+export type AgentSummary = z.infer<typeof AgentSummarySchema>;
+export type AgentLaunch = string;
 export type RunFailure = z.infer<typeof RunFailureSchema>;
 export type TokenUsage = z.infer<typeof TokenUsageSchema>;
 export type Cost = z.infer<typeof CostSchema>;

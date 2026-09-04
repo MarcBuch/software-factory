@@ -4,6 +4,8 @@ import {
   RunSchema,
   TokenUsageSchema,
   TraceEventSchema,
+  AgentCapabilitySchema,
+  type AgentCapability,
 } from "@software-factory/contracts";
 import { z } from "zod";
 
@@ -35,6 +37,7 @@ export const WorkflowInputSchema = z
 export const AgentRosterEntrySchema = z
   .object({
     name: nonEmptyText,
+    version: z.number().int().positive().optional(),
     opencodeAgent: nonEmptyText.optional(),
     purpose: nonEmptyText,
     model: nonEmptyText,
@@ -42,8 +45,48 @@ export const AgentRosterEntrySchema = z
     userPromptTemplate: nonEmptyText,
     allowedTools: z.array(nonEmptyText).readonly(),
     writeBoundary: z.array(RepositoryRelativePathSchema).readonly(),
+    capabilities: z.array(AgentCapabilitySchema).readonly().optional(),
   })
   .strict();
+export type { AgentCapability };
+
+export const EffectiveRunDefinitionSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    agent: z
+      .object({
+        id: nonEmptyText,
+        version: z.number().int().positive(),
+        provenance: z.literal("builtin"),
+      })
+      .strict(),
+    workflow: z
+      .object({
+        id: nonEmptyText,
+        version: z.number().int().positive(),
+        agent: nonEmptyText,
+        provenance: z.literal("builtin"),
+      })
+      .strict(),
+    runtime: z
+      .object({
+        id: nonEmptyText,
+        adapterId: nonEmptyText,
+        capabilities: z.array(AgentCapabilitySchema).readonly(),
+        model: nonEmptyText.optional(),
+        profile: z.record(z.string(), z.unknown()).readonly().optional(),
+      })
+      .strict(),
+    completionContract: z.literal("factory-result-json-v1"),
+    policy: z
+      .object({
+        capabilities: z.array(AgentCapabilitySchema).readonly(),
+        writeBoundary: z.array(RepositoryRelativePathSchema).readonly(),
+      })
+      .strict(),
+  })
+  .strict();
+export type EffectiveRunDefinition = z.infer<typeof EffectiveRunDefinitionSchema>;
 
 export const ArtifactRecordSchema = z
   .object({ path: RepositoryRelativePathSchema, kind: nonEmptyText, description: nonEmptyText })

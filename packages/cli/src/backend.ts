@@ -4,6 +4,13 @@ import { join } from "node:path";
 import type { OpenCodeClient, OpenCodeEvent, SessionMessageAssistant } from "@opencode-ai/client";
 import { TraceEventSchema, type TraceEvent } from "@software-factory/contracts";
 
+import type {
+  AgentRuntimeAdapter,
+  BackendEvent,
+  BackendExit,
+  BackendInvocation,
+  BackendProcess,
+} from "./agent-runtime";
 import {
   defaultLifecycleDiagnostic,
   errorDetails,
@@ -15,50 +22,14 @@ import type {
   UiHostManagerBackendFailureError,
 } from "./ui-host-manager";
 import { UiHostManagerEventQueueOverflowError } from "./ui-host-manager";
-import type { AgentRosterEntry } from "./workflow";
 
 /** The deliberately small contract implemented by all workflow backends. */
-export type BackendInvocation = Readonly<{
-  repositoryRoot: string;
-  runId: string;
-  agent: AgentRosterEntry;
-  prompt: string;
-  systemPrompt?: string;
-  model?: string;
-  tools?: readonly string[];
-}>;
+export type { BackendEvent, BackendExit, BackendInvocation, BackendProcess } from "./agent-runtime";
 
-export type BackendEvent = Readonly<{
-  stream: "stdout" | "stderr";
-  raw: string;
-  parsed?: unknown;
-  normalized?: TraceEvent;
-  sessionId?: string;
-}>;
-
-export type BackendExit = Readonly<{
-  code: number | null;
-  signal: string | null;
-  signalCode: string | null;
-  sessionId?: string;
-}>;
-
-export interface BackendProcess extends AsyncIterable<BackendEvent> {
-  /** Identifies whether this execution owns an OS child process or a service session. */
-  readonly executionKind?: "subprocess" | "service" | "embedded";
-  readonly pid: number;
-  readonly command: readonly string[];
-  readonly exit: Promise<BackendExit>;
-  kill(signal?: number | NodeJS.Signals): void;
-  cancel(): void;
-  continue(prompt: string): BackendProcess;
-}
-
-export interface BackendAdapter {
-  /** Service SDK sessions can execute concurrently on one shared host. */
-  readonly supportsConcurrent?: boolean;
-  start(invocation: BackendInvocation): BackendProcess;
-}
+/** Harness-neutral runtime vocabulary. Adapters translate these to their native tools. */
+export type { RuntimeCapability } from "./agent-runtime";
+/** Compatibility alias; orchestration uses the neutral runtime contract. */
+export type BackendAdapter = AgentRuntimeAdapter;
 
 type Spawned = {
   pid: number;
@@ -364,7 +335,7 @@ class OpenCodeProcess implements BackendProcess {
           code,
           signal,
           signalCode,
-          sessionId: this.sessionId,
+          executionId: this.sessionId,
         };
       },
       (_error: unknown) => {
@@ -372,7 +343,7 @@ class OpenCodeProcess implements BackendProcess {
           code: null,
           signal: child.signalCode ?? null,
           signalCode: child.signalCode ?? null,
-          sessionId: this.sessionId,
+          executionId: this.sessionId,
         };
       },
     );
@@ -380,7 +351,7 @@ class OpenCodeProcess implements BackendProcess {
   }
 
   private push(event: BackendEvent) {
-    if (event.sessionId) this.sessionId = event.sessionId;
+    if (event.executionId) this.sessionId = event.executionId;
     const waiter = this.waiting.shift();
     if (waiter) waiter({ value: event, done: false });
     else this.queue.push(event);
@@ -446,7 +417,7 @@ class OpenCodeProcess implements BackendProcess {
         : {
             parsed,
             normalized: normalized(this.invocation.runId, parsed),
-            sessionId: sessionOf(parsed),
+            executionId: sessionOf(parsed),
           }),
     });
   }
@@ -478,8 +449,16 @@ class OpenCodeProcess implements BackendProcess {
 }
 
 export class OpenCodeAdapter implements BackendAdapter {
+  readonly id = "opencode-cli-v1";
+  readonly capabilities = [
+    "repository.read",
+    "repository.write",
+    "workflow.delegate",
+    "workflow.skill",
+  ] as const;
   constructor(private readonly options: OpenCodeOptions = {}) {}
   start(invocation: BackendInvocation & { _sessionId?: string }): BackendProcess {
+    const profile = openCodeProfile(invocation.agent.adapterProfile, invocation.agent);
     const prompt = invocation.systemPrompt
       ? `${invocation.systemPrompt}\n\n${invocation.prompt}`
       : invocation.prompt;
@@ -491,9 +470,9 @@ export class OpenCodeAdapter implements BackendAdapter {
       "json",
       "--dir",
       invocation.repositoryRoot,
-      ...(invocation.agent.opencodeAgent ? ["--agent", invocation.agent.opencodeAgent] : []),
+      ...(profile ? ["--agent", profile] : []),
       "--model",
-      invocation.model ?? invocation.agent.model,
+      invocation.model ?? invocation.agent.model ?? "",
       ...(invocation._sessionId ? ["--session", invocation._sessionId] : []),
       prompt,
     ];
@@ -503,6 +482,19 @@ export class OpenCodeAdapter implements BackendAdapter {
       : Bun.spawn(command, { cwd: invocation.repositoryRoot, env, stdout: "pipe", stderr: "pipe" });
     return new OpenCodeProcess(invocation, this.options, command, child as Spawned);
   }
+}
+
+type OpenCodeBinding = Readonly<{ opencodeAgent?: string }>;
+function openCodeProfile(
+  profile: Readonly<Record<string, unknown>> | undefined,
+  legacyAgent?: unknown,
+): string | undefined {
+  const value =
+    profile?.opencodeAgent ??
+    (legacyAgent && typeof legacyAgent === "object"
+      ? (legacyAgent as OpenCodeBinding).opencodeAgent
+      : undefined);
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /** The small subset of the V2 service client used to start a run. */
@@ -685,7 +677,7 @@ class V2OpenCodeProcess implements BackendProcess {
   }
 
   private push(event: BackendEvent) {
-    if (event.sessionId) this.sessionId = event.sessionId;
+    if (event.executionId) this.sessionId = event.executionId;
     const waiter = this.waiters.shift();
     if (waiter) waiter({ value: event, done: false });
     else this.events.push(event);
@@ -722,7 +714,7 @@ class V2OpenCodeProcess implements BackendProcess {
             raw: JSON.stringify(value),
             parsed: value,
             normalized: normalizedV2(this.invocation.runId, event, this.toolNames),
-            sessionId,
+            executionId: sessionId,
           });
         },
         onError: (error: UiHostManagerBackendFailureError) => {
@@ -756,7 +748,8 @@ class V2OpenCodeProcess implements BackendProcess {
         },
       });
       const execute = async (client: V2Client) => {
-        const model = this.invocation.model ?? this.invocation.agent.model;
+        const model = this.invocation.model ?? this.invocation.agent.model ?? "";
+        const profile = openCodeProfile(this.invocation.agent.adapterProfile);
         if (this.createsSession) {
           const reservedId = this.sessionId ?? createV2SessionId();
           this.onDiagnostic({
@@ -770,9 +763,7 @@ class V2OpenCodeProcess implements BackendProcess {
           const creating = client.session.create(
             {
               location: { directory: this.invocation.repositoryRoot },
-              ...(this.invocation.agent.opencodeAgent
-                ? { agent: this.invocation.agent.opencodeAgent }
-                : {}),
+              ...(profile ? { agent: profile } : {}),
               id: reservedId,
               ...(model
                 ? {
@@ -828,7 +819,7 @@ class V2OpenCodeProcess implements BackendProcess {
                 raw: JSON.stringify(item.event),
                 parsed: item.event,
                 normalized: normalizedV2(this.invocation.runId, item.event, this.toolNames),
-                sessionId: item.sessionId,
+                executionId: item.sessionId,
               });
           }
           if (this.canceled) this.requestInterrupt(client);
@@ -975,14 +966,14 @@ class V2OpenCodeProcess implements BackendProcess {
             // emit it directly rather than inventing an SDK event discriminant.
             raw: JSON.stringify(latestAssistant),
             parsed: latestAssistant,
-            sessionId: this.sessionId,
+            executionId: this.sessionId,
           });
         }
       };
       if (this.options.client) await execute(this.options.client);
       else await this.abortable(this.options.hostManager.withHost(execute));
       if (this.hostFailure)
-        return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+        return { code: null, signal: null, signalCode: null, executionId: this.sessionId };
       this.onDiagnostic({
         event: "run",
         backend: "v2-client",
@@ -990,16 +981,16 @@ class V2OpenCodeProcess implements BackendProcess {
         sessionId: this.sessionId,
         state: "succeeded",
       });
-      return { code: 0, signal: null, signalCode: null, sessionId: this.sessionId };
+      return { code: 0, signal: null, signalCode: null, executionId: this.sessionId };
     } catch (error) {
       if (this.canceled) {
-        return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+        return { code: null, signal: null, signalCode: null, executionId: this.sessionId };
       }
       if (this.hostFailure)
-        return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+        return { code: null, signal: null, signalCode: null, executionId: this.sessionId };
       const message = error instanceof Error ? error.message : String(error);
-      this.push({ stream: "stderr", raw: `V2 error: ${message}`, sessionId: this.sessionId });
-      return { code: null, signal: null, signalCode: null, sessionId: this.sessionId };
+      this.push({ stream: "stderr", raw: `V2 error: ${message}`, executionId: this.sessionId });
+      return { code: null, signal: null, signalCode: null, executionId: this.sessionId };
     } finally {
       // Cancellation is best effort. In particular, a host may never settle
       // create/prompt/wait/list; exit must still release the UI shutdown path.
@@ -1113,6 +1104,13 @@ class V2OpenCodeProcess implements BackendProcess {
 
 /** Service V2 adapter. It creates exactly one session per invocation. */
 export class V2OpenCodeAdapter implements BackendAdapter {
+  readonly id = "opencode-service-v2";
+  readonly capabilities = [
+    "repository.read",
+    "repository.write",
+    "workflow.delegate",
+    "workflow.skill",
+  ] as const;
   readonly supportsConcurrent = true;
   constructor(private readonly options: V2OpenCodeOptions) {}
   start(invocation: BackendInvocation): BackendProcess {

@@ -37,7 +37,11 @@ const processOf = (
     return iterator;
   },
 });
-const adapterOf = (start: () => BackendProcess): BackendAdapter => ({ start });
+const adapterOf = (start: () => BackendProcess): BackendAdapter => ({
+  id: "fake-completion",
+  capabilities: ["repository.read", "repository.write", "workflow.delegate", "workflow.skill"],
+  start,
+});
 
 test("completeAgent converts iterator and exit failures to backend_failure", async () => {
   const iterator = processOf(

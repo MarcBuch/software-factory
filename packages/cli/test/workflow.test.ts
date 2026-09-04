@@ -14,6 +14,7 @@ import {
   ArtifactRecordSchema,
   BackendInvocationSchema,
   BackendResultSchema,
+  EffectiveRunDefinitionSchema,
   RunSchema,
   TraceEventSchema,
   WorkflowInputSchema,
@@ -21,6 +22,15 @@ import {
 import { completedVisualization, delegatedExplorer } from "../src/workflow-service";
 
 const result = { status: "success" as const, summary: "done", artifacts: [], notes: [] };
+
+test("effective run definition rejects a malformed snapshot", () => {
+  expect(() =>
+    EffectiveRunDefinitionSchema.parse({
+      schemaVersion: 1,
+      agent: { id: "builder", version: 1, provenance: "builtin", prompt: "credential" },
+    }),
+  ).toThrow();
+});
 
 function liveV2Event(type: string, data: Record<string, unknown>) {
   return normalizedV2("planner-run", { type, created: 1_735_000_000_000, data } as never);

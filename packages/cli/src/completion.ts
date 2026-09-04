@@ -1,4 +1,9 @@
-import type { BackendAdapter, BackendEvent, BackendInvocation, BackendProcess } from "./backend";
+import type {
+  AgentRuntimeAdapter as BackendAdapter,
+  BackendEvent,
+  BackendInvocation,
+  BackendProcess,
+} from "./agent-runtime";
 import { FACTORY_RESULT_END, FACTORY_RESULT_START, FactoryFinalResultSchema } from "./roster";
 import type { AgentResult } from "./workflow";
 

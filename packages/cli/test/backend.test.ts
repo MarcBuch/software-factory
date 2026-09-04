@@ -97,7 +97,7 @@ test("OpenCode builds the documented JSON run command and streams raw/normalized
       "warning",
     ]),
   );
-  expect(events[0]?.sessionId).toBe("ses_1");
+  expect(events[0]?.executionId).toBe("ses_1");
   expect(events[0]?.normalized).toBeUndefined();
   expect(
     events.find(
@@ -121,7 +121,7 @@ test("OpenCode builds the documented JSON run command and streams raw/normalized
     code: 0,
     signal: null,
     signalCode: null,
-    sessionId: "ses_1",
+    executionId: "ses_1",
   });
 });
 
@@ -352,7 +352,7 @@ test("V2 registers event routing before creating one configured session and prom
     prompt: "user",
   });
   expect(process.executionKind).toBe("service");
-  expect(await process.exit).toMatchObject({ code: 0, sessionId: "v2-session" });
+  expect(await process.exit).toMatchObject({ code: 0, executionId: "v2-session" });
   expect(calls[0]).toBe("register");
   expect(calls.filter((call) => call.startsWith("create:")).length).toBe(1);
   expect(calls.find((call) => call.startsWith("create:"))).toMatch(/"id":"ses_[0-9a-f]{32}"/);
@@ -498,7 +498,7 @@ test("V2 does not leak pre-creation events from a concurrent session", async () 
   }).start({ repositoryRoot: "/repo", runId: "r", agent, prompt: "prompt" });
   const events = [];
   for await (const event of process) events.push(event);
-  expect(events.map((event) => event.sessionId)).toEqual(["owned"]);
+  expect(events.map((event) => event.executionId)).toEqual(["owned"]);
   expect(events[0]?.raw).toContain("owned");
 });
 
@@ -540,7 +540,7 @@ test("V2 accepts a reserved session event without location before creation resol
 
   const events = [];
   for await (const value of process) events.push(value);
-  expect(events.map((value) => value.sessionId)).toEqual([createInput.id]);
+  expect(events.map((value) => value.executionId)).toEqual([createInput.id]);
   expect((await process.exit).code).toBe(0);
 });
 
@@ -632,7 +632,7 @@ test("V2 continuation reuses the session and reconciles its latest stored assist
   });
   await process.exit;
   const continuation = process.continue("second");
-  expect((await continuation.exit).sessionId).toBe("same-session");
+  expect((await continuation.exit).executionId).toBe("same-session");
   expect(calls.filter((call) => call === "create")).toHaveLength(1);
   expect(calls).toContain("prompt:same-session:second");
   expect(calls).toContain("messages:same-session");
