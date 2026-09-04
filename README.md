@@ -52,3 +52,82 @@ Workflow runtime data is under `.factory/runs/<run-id>/` (prompts, `result.json`
 Before execution, the generic workflow harness snapshots the Git worktree and compares/restores it afterward. Runtime paths under `.factory` are exempt from worktree path comparison, but staging/index mutations still violate the boundary. The worktree must not have pre-existing untracked files outside that runtime directory; an exclusive-access assumption is required because concurrent edits or untracked-file changes can be rejected or complicate restoration. This is a boundary check, not a security guarantee.
 
 Workflow scope is intentionally narrow. It does not plan, run tests, create commits, perform retries beyond the single correction continuation, create handoffs, or resume a session later.
+
+## UI OpenCode service and v2-client rollout
+
+UI-launched workflows default to the generated `@opencode-ai/client` service
+client. The supported service-version predicate accepts `opencode2` versions
+matching `0.0.0-dev-*`, `0.0.0-beta-*`, or `2.*`; the Factory client dependency is
+`@opencode-ai/client` `^0.0.0-dev-18987` (see `packages/cli/package.json`). Validate
+the exact local pair before rollout:
+
+```sh
+bun run --cwd packages/cli service-harness
+```
+
+The harness must be run from this repository (it exercises the repository's
+config, agents, provider/models, concurrent sessions, and interrupts). The
+canonical commands are:
+
+```sh
+factory ui --backend v2-client   # default and rollout target
+factory ui --backend v1-cli      # rollback
+```
+
+`v2-sdk` is explicitly rejected; it is neither an alias nor a fallback. Use
+`v2-client` or roll back to `v1-cli`. The standalone `factory workflow run`
+command remains on the V1 CLI backend.
+
+`Service.ensure` owns discovery/starting of one shared `opencode2 serve
+--service` endpoint. Factory never stops that service: closing the UI releases
+only its event subscription and client/session handles. A UI process shares one
+host, each invocation gets one session, and correction is sent to that same
+session. Cancellation is session-scoped. In-memory handles are lost on a UI or
+service restart; persisted runs whose handle is gone are orphans and cannot be
+resumed or stopped through the old handle.
+
+### Repository preflight and rollout checklist
+
+Run from the target Git repository, with a clean worktree (including no
+pre-existing untracked files outside `.factory/`). The service is checked using
+the canonical real path of the repository. Before a v2 run, Factory verifies
+that location and project location resolve to that path, that `.opencode/` is
+the loaded config location, and that the requested agent is discoverable there.
+Same-repository workflows are serialized by the Factory lock; do not run
+competing Factory workflows in one repository. Different repositories may use
+the shared service concurrently.
+
+Commit these files before using the v2 backend (or install/refresh them with
+`factory mission init --skills` and commit the result):
+
+- `.opencode/agents/scout.md`
+- `.opencode/agents/plan-mission.md`
+- `.agents/skills/plan-mission/SKILL.md`
+- `.agents/skills/run-mission/SKILL.md`
+- `.agents/skills/visualize-change/SKILL.md`
+
+`mission init --skills` installs the bundled mission skills and the `scout` and
+`plan-mission` agents at those canonical paths. Confirm `git status --short` is
+clean afterward. The selected server-side agent owns its tool and permission
+policy; the post-run Git write-boundary check remains authoritative, and
+read-only tool selection is not preventative write protection.
+
+### Troubleshooting and rollback
+
+- **Version mismatch or service health failure:** check `opencode2 --version`,
+  the client version in `packages/cli/package.json`, and rerun the service
+  harness. Use `factory ui --backend v1-cli` while the pair is corrected.
+- **Missing agent/config:** run `factory mission init --skills`, commit the
+  listed files, and retry from the repository root. Symlinked paths must still
+  resolve to the canonical repository; a failed preflight may refresh only that
+  location on the shared service.
+- **Untracked-file or boundary rejection:** stop concurrent edits/workflows,
+  inspect `git status --short`, and clean or commit files outside `.factory/`
+  before retrying.
+- **Restarted UI/service:** start a new UI session; old in-memory handles cannot
+  be resumed or stopped. The shared service is not stopped by Factory.
+
+Lifecycle diagnostics identify backend and operation (and may include run/session
+IDs), but never include provider payloads or credentials; sensitive error details
+are redacted. For live v2 runs, configure the provider and credentials expected
+by the local OpenCode installation without copying secrets into diagnostics.
