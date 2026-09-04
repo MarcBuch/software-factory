@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -6,18 +6,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import type { LaunchAgent, Run } from "@/workflow/workflow-context";
-export const launchAgents = {
-  scout: {
-    label: "Scout",
-    detail: "READ-ONLY RESEARCH",
-    placeholder: "What should the scout inspect?",
-  },
-  planner: {
-    label: "Planner",
-    detail: "RESEARCH + MISSION PLAN",
-    placeholder: "What should the planner prepare?",
-  },
-} as const;
 const date = (v?: string) =>
   v
     ? new Date(v).toLocaleString(undefined, {
@@ -36,6 +24,9 @@ export function List({
   hasMore,
   launching,
   onLaunch,
+  agents,
+  agentsLoading,
+  agentsError,
 }: {
   runs: Run[];
   onSelect: (id: string) => void;
@@ -43,14 +34,29 @@ export function List({
   hasMore: boolean;
   launching: boolean;
   onLaunch: (request: string, agentName: LaunchAgent) => Promise<void>;
+  agents: Array<{
+    id: string;
+    purpose: string;
+    label: string;
+    detail: string;
+    placeholder: string;
+  }>;
+  agentsLoading: boolean;
+  agentsError?: string;
 }) {
   const [request, setRequest] = useState("");
   const [agentName, setAgentName] = useState<LaunchAgent>("scout");
-  const agent = launchAgents[agentName];
+  const available = agentsLoading || agentsError ? [] : agents;
+  const selected = available.find((item) => item.id === agentName) ?? available[0];
+  const agent = selected;
+  useEffect(() => {
+    if (selected && selected.id !== agentName) setAgentName(selected.id);
+  }, [agentName, selected]);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const value = request.trim();
     if (!value || launching) return;
+    if (!agent) return;
     try {
       await onLaunch(value, agentName);
       setRequest("");
@@ -65,28 +71,46 @@ export function List({
               <div>
                 <h2>Launch workflow</h2>
                 <span>
-                  {agent.label.toUpperCase()} · {agent.detail}
+                  {agent
+                    ? `${agent.label.toUpperCase()} · ${agent.detail}`
+                    : agentsLoading
+                      ? "Loading agents…"
+                      : agentsError
+                        ? "Agents unavailable"
+                        : "No agents available"}
                 </span>
               </div>
-              <Button type="submit" disabled={launching || !request.trim()}>
+              <Button
+                type="submit"
+                disabled={
+                  launching || !request.trim() || !selected || agentsLoading || !!agentsError
+                }
+              >
                 {launching ? "Launching…" : "Launch session"}
               </Button>
             </div>
             <label className="launch-agent">
-              <span>Agent</span>
+              <span>Agent {agentsLoading ? "(loading…)" : ""}</span>
+              {agentsError ? <small role="alert">{agentsError}</small> : null}
+              {!agentsLoading && !agentsError && !available.length ? (
+                <small>No agents available.</small>
+              ) : null}
               <select
                 value={agentName}
-                onChange={(e) => setAgentName(e.target.value as LaunchAgent)}
-                disabled={launching}
+                onChange={(e) => setAgentName(e.target.value)}
+                disabled={launching || agentsLoading || !!agentsError || !available.length}
               >
-                <option value="scout">Scout - inspect the repository</option>
-                <option value="planner">Planner - prepare a mission plan</option>
+                {available.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.id} - {item.purpose}
+                  </option>
+                ))}
               </select>
             </label>
             <Textarea
               value={request}
               onChange={(e) => setRequest(e.target.value)}
-              placeholder={agent.placeholder}
+              placeholder={agent?.placeholder ?? "Select an available agent"}
               aria-label="Workflow request"
               disabled={launching}
             />

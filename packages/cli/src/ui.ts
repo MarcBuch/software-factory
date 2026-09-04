@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
-import { DeletePlanResponseSchema } from "@software-factory/contracts";
+import { AgentsResponseSchema, DeletePlanResponseSchema } from "@software-factory/contracts";
 
 import { ensureV2AgentAvailable, OpenCodeAdapter, V2OpenCodeAdapter } from "./backend";
 import {
@@ -11,7 +11,7 @@ import {
   type LifecycleDiagnosticSink,
 } from "./lifecycle-diagnostics";
 import { deletePlanCascadeAtomic, loadPlans } from "./plans";
-import { lookupRoster } from "./roster";
+import { BUILTIN_REGISTRY, lookupRegistry, lookupRoster } from "./roster";
 import { recoverFactoryTransaction, withFactoryLock } from "./storage";
 import { UiHostManager, type UiHostFactory } from "./ui-host-manager";
 import {
@@ -199,6 +199,20 @@ export async function startUiServer(options: UiServerOptions) {
         const url = new URL(request.url);
         const path = url.pathname;
         if (path === "/api/health") return json({ ok: true });
+        if (request.method === "GET" && path === "/api/agents")
+          return json(
+            AgentsResponseSchema.parse({
+              agents: BUILTIN_REGISTRY.map((entry) => ({
+                id: entry.agent.name,
+                version: entry.workflow.version,
+                purpose: entry.agent.purpose,
+                model: entry.agent.model,
+                capabilities: entry.agent.capabilities,
+                writeBoundary: entry.agent.writeBoundary,
+                ...entry.ui,
+              })),
+            }),
+          );
         if (request.method === "GET" && path === "/api/plans") {
           const plans = await withFactoryLock(repositoryRoot, async () => {
             await recoverFactoryTransaction(repositoryRoot);
@@ -238,6 +252,7 @@ export async function startUiServer(options: UiServerOptions) {
           let input: ReturnType<typeof validateWorkflowInput>;
           try {
             input = validateWorkflowInput(await request.json());
+            lookupRegistry(input.agentName);
           } catch (error) {
             return json({ error: error instanceof Error ? error.message : String(error) }, 400);
           }

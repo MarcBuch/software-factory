@@ -1,5 +1,6 @@
 import {
   LaunchRequestSchema,
+  AgentsResponseSchema,
   LaunchResponseSchema,
   DeleteResponseSchema,
   DeletePlanResponseSchema,
@@ -31,7 +32,13 @@ export type TracePage = {
   summary: TraceSummary;
   publicRun?: Run;
 };
-export type LaunchAgent = "scout" | "planner";
+export type LaunchAgent = string;
+
+export const agentsQuery = () =>
+  useQuery({
+    queryKey: ["agents"],
+    queryFn: () => apiSchema("/api/agents", AgentsResponseSchema),
+  });
 
 export const planQuery = () =>
   useQuery({

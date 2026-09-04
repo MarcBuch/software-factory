@@ -124,6 +124,25 @@ function setup(initialEntry = "/runs") {
         );
       if (init?.method === "DELETE")
         return Promise.resolve(jsonResponse({ deleted: true, runId: "run-1" }));
+      if (path.endsWith("/api/agents"))
+        return Promise.resolve(
+          jsonResponse({
+            agents: [
+              {
+                id: "scout",
+                version: 1,
+                purpose: "Inspect the repository",
+                model: "test/model",
+                capabilities: ["repository.read"],
+                writeBoundary: [],
+                label: "Scout",
+                description: "Read-only research",
+                placeholder: "What should the scout inspect?",
+                detail: "READ-ONLY RESEARCH",
+              },
+            ],
+          }),
+        );
       if (path.includes("/trace"))
         return Promise.resolve(
           jsonResponse({ runId: "run-1", events: [], hasMore: false, summary, publicRun: run }),
@@ -182,6 +201,7 @@ describe("router shell", () => {
       </QueryClientProvider>,
     );
     await screen.findByRole("heading", { name: "Session traces" });
+    expect(await screen.findByRole("option", { name: /scout - inspect/i })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Workflow request" }), {
       target: { value: "Launch this workflow" },
     });

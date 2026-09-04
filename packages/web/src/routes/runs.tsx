@@ -3,11 +3,13 @@ import { useEffect } from "react";
 
 import { useAppHeader } from "@/components/app-shell";
 import { List } from "@/components/runs/run-list";
+import { agentsQuery } from "@/data/queries";
 import { useWorkflow } from "@/workflow/workflow-context";
 
 export const Route = createFileRoute("/runs")({
   component: () => {
     const w = useWorkflow();
+    const agents = agentsQuery();
     const { setSelected } = w;
     const navigate = useNavigate();
     const isDetail = useMatches().some((match) => match.routeId === "/runs/$runId");
@@ -29,6 +31,9 @@ export const Route = createFileRoute("/runs")({
         hasMore={w.cursor !== undefined}
         launching={w.launching}
         onLaunch={w.launch}
+        agents={agents.data?.agents ?? []}
+        agentsLoading={agents.isLoading}
+        agentsError={agents.error?.message}
       />
     );
   },

@@ -4,8 +4,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { AgentsResponseSchema } from "@software-factory/contracts";
+
 import { ensureV2AgentAvailable, type V2Client } from "../src/backend";
 import { createDraftPlan, PLAN_INPUT_EXAMPLE, savePlans } from "../src/plans";
+import { BUILTIN_REGISTRY } from "../src/roster";
 import { startUiServer } from "../src/ui";
 import { type UiHost, type UiHostEvent } from "../src/ui-host-manager";
 import { WorkflowAlreadyRunning, type WorkflowLaunch } from "../src/workflow-service";
@@ -128,6 +131,32 @@ afterEach(async () => {
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
+});
+
+test("UI server exposes the ordered agent catalog without prompts", async () => {
+  const ui = await startUiServer({ repositoryRoot: await gitRepo(), port: 0 });
+  try {
+    const response = await fetch(new URL("/api/agents", ui.url));
+    expect(response.status).toBe(200);
+    const body = AgentsResponseSchema.parse(await response.json());
+    expect(body.agents.map((agent) => agent.id)).toEqual(
+      BUILTIN_REGISTRY.map((entry) => entry.agent.name),
+    );
+    for (const agent of body.agents) {
+      expect(agent).toMatchObject({
+        version: expect.any(Number),
+        purpose: expect.any(String),
+        model: expect.any(String),
+        capabilities: expect.any(Array),
+        writeBoundary: expect.any(Array),
+      });
+      expect(agent).not.toHaveProperty("systemPrompt");
+      expect(agent).not.toHaveProperty("userPromptTemplate");
+      expect(JSON.stringify(agent)).not.toMatch(/prompt/i);
+    }
+  } finally {
+    await ui.close();
+  }
 });
 
 test("V2 UI shares one fake host without cross-talk and cleans active sessions", async () => {
