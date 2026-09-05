@@ -1,5 +1,4 @@
 import { realpath } from "node:fs/promises";
-import { join } from "node:path";
 
 import type { OpenCodeClient, OpenCodeEvent, SessionMessageAssistant } from "@opencode-ai/client";
 import { TraceEventSchema, type TraceEvent } from "@software-factory/contracts";
@@ -500,7 +499,6 @@ function openCodeProfile(
 /** The small subset of the V2 service client used to start a run. */
 export type V2Client = {
   agent: Pick<OpenCodeClient["agent"], "list">;
-  config: Pick<OpenCodeClient["config"], "get">;
   location: Pick<OpenCodeClient["location"], "get">;
   debug?: {
     location?: Pick<NonNullable<OpenCodeClient["debug"]>["location"], "evict">;
@@ -508,6 +506,53 @@ export type V2Client = {
   session: Pick<OpenCodeClient["session"], "create" | "prompt" | "wait" | "interrupt" | "active">;
   message: Pick<OpenCodeClient["message"], "list">;
 };
+
+export type V2PreflightErrorCode =
+  | "V2_LOCATION_TRANSPORT"
+  | "V2_LOCATION_MISMATCH"
+  | "V2_AGENT_MISSING"
+  | "V2_LOCATION_RELOAD_FAILED"
+  | "V2_PROTOCOL_ERROR";
+
+export type V2PreflightErrorCategory = "transport" | "protocol" | "location" | "agent" | "reload";
+
+/** Safe, structured failure returned when the service cannot serve a repository. */
+export class V2PreflightError extends Error {
+  readonly code: V2PreflightErrorCode;
+  readonly details: Readonly<Record<string, unknown>>;
+  readonly category: V2PreflightErrorCategory;
+  readonly retryable: boolean;
+
+  constructor(
+    code: V2PreflightErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    metadata: { category?: V2PreflightErrorCategory; retryable?: boolean } = {},
+  ) {
+    super(message);
+    this.name = "V2PreflightError";
+    this.code = code;
+    this.details = details;
+    this.category =
+      metadata.category ??
+      (code === "V2_LOCATION_TRANSPORT"
+        ? "transport"
+        : code === "V2_PROTOCOL_ERROR"
+          ? "protocol"
+          : code === "V2_LOCATION_MISMATCH"
+            ? "location"
+            : code === "V2_AGENT_MISSING"
+              ? "agent"
+              : "reload");
+    this.retryable =
+      metadata.retryable ?? (code === "V2_LOCATION_MISMATCH" || code === "V2_AGENT_MISSING");
+  }
+}
+
+/** All supported location-scoped SDK calls go through this input builder. */
+function locationInput(directory: string) {
+  return { location: { directory } };
+}
 
 /** Verify a repository-local custom agent, refreshing only that location when needed. */
 export async function ensureV2AgentAvailable(
@@ -517,8 +562,8 @@ export async function ensureV2AgentAvailable(
   onDiagnostic?: LifecycleDiagnosticSink,
 ) {
   const diagnostic = onDiagnostic ?? (() => {});
-  const location = { directory: repositoryRoot };
   const expected = await realpath(repositoryRoot);
+  let lastPreflightError: V2PreflightError | undefined;
   const equivalent = async (value: unknown, target: string) => {
     if (typeof value !== "string") return false;
     try {
@@ -529,18 +574,72 @@ export async function ensureV2AgentAvailable(
   };
   const check = async () => {
     diagnostic({ event: "agent_preflight", backend: "v2-client", state: "started" });
-    const resolved = await client.location.get({ location });
-    const agents = await client.agent.list({ location });
-    const configs = await client.config.get({ location });
+    let resolvedResponse: unknown;
+    let agentsResponse: unknown;
+    try {
+      const input = locationInput(expected);
+      resolvedResponse = await client.location.get(input);
+      agentsResponse = await client.agent.list(input);
+    } catch (cause) {
+      throw new V2PreflightError("V2_LOCATION_TRANSPORT", "OpenCode location preflight failed", {
+        directory: expected,
+        cause: errorDetails(cause),
+      });
+    }
+    const resolved = resolvedResponse as { directory?: unknown; project?: { directory?: unknown } };
+    const agentsEnvelope = agentsResponse as { location?: unknown; data?: unknown };
+    const agents = agentsEnvelope?.data;
+    if (
+      !resolved ||
+      typeof resolved !== "object" ||
+      typeof resolved.directory !== "string" ||
+      !resolved.project ||
+      typeof resolved.project !== "object" ||
+      typeof resolved.project.directory !== "string" ||
+      !agentsEnvelope ||
+      typeof agentsEnvelope !== "object" ||
+      !agentsEnvelope.location ||
+      typeof agentsEnvelope.location !== "object" ||
+      typeof (agentsEnvelope.location as { directory?: unknown }).directory !== "string" ||
+      !Array.isArray(agents)
+    )
+      throw new V2PreflightError(
+        "V2_PROTOCOL_ERROR",
+        "OpenCode location preflight returned an invalid response",
+        {
+          directory: expected,
+        },
+      );
     const locationOk =
       (await equivalent(resolved.directory, expected)) &&
       (await equivalent(resolved.project?.directory, expected));
-    const configPath = join(expected, ".opencode");
-    const configOk = (configs ?? []).some((entry) => equivalent(entry.path, configPath));
+    if (!locationOk)
+      throw new V2PreflightError(
+        "V2_LOCATION_MISMATCH",
+        "OpenCode location verification failed: service location does not match repository",
+        {
+          directory: expected,
+          resolvedDirectory: resolved.directory,
+          projectDirectory: resolved.project?.directory,
+        },
+      );
     const agentOk =
       !opencodeAgent ||
-      agents.data.some((agent) => agent.id === opencodeAgent || agent.name === opencodeAgent);
-    const valid = locationOk && configOk && agentOk;
+      agents.some((agent) => {
+        if (!agent || typeof agent !== "object") return false;
+        const value = agent as { id?: unknown; name?: unknown };
+        return value.id === opencodeAgent || value.name === opencodeAgent;
+      });
+    if (!agentOk)
+      throw new V2PreflightError(
+        "V2_AGENT_MISSING",
+        `OpenCode location verification failed: agent is unavailable: ${opencodeAgent}`,
+        {
+          directory: expected,
+          agent: opencodeAgent,
+        },
+      );
+    const valid = true;
     diagnostic({
       event: "agent_preflight",
       backend: "v2-client",
@@ -550,12 +649,23 @@ export async function ensureV2AgentAvailable(
   };
   // A shared service can retain a failed location load. Refresh only this repository;
   // callers must check their workflow lock before invoking this operation.
-  if (await check()) return;
+  try {
+    if (await check()) return;
+  } catch (error) {
+    if (!(error instanceof V2PreflightError) || !error.retryable) throw error;
+    lastPreflightError = error;
+  }
   diagnostic({ event: "location_refresh", backend: "v2-client", state: "started" });
   try {
-    await client.debug?.location?.evict({ location });
-    diagnostic({ event: "location_refresh", backend: "v2-client", state: "succeeded" });
-  } catch (error) {
+    if (!client.debug?.location?.evict)
+      throw new Error("location eviction endpoint is unavailable");
+    await client.debug.location.evict(locationInput(expected));
+  } catch (cause) {
+    const error = new V2PreflightError(
+      "V2_LOCATION_RELOAD_FAILED",
+      "OpenCode location reload failed",
+      { directory: expected, cause: errorDetails(cause) },
+    );
     diagnostic({
       event: "location_refresh",
       backend: "v2-client",
@@ -564,8 +674,20 @@ export async function ensureV2AgentAvailable(
     });
     throw error;
   }
-  if (!(await check())) {
-    const error = new Error("OpenCode location verification failed");
+  diagnostic({ event: "location_refresh", backend: "v2-client", state: "succeeded" });
+  let verified = false;
+  try {
+    verified = await check();
+  } catch (error) {
+    if (!(error instanceof V2PreflightError)) throw error;
+    lastPreflightError = error;
+  }
+  if (!verified) {
+    const error =
+      lastPreflightError ??
+      new V2PreflightError("V2_LOCATION_RELOAD_FAILED", "OpenCode location verification failed", {
+        directory: expected,
+      });
     diagnostic({
       event: "agent_preflight",
       backend: "v2-client",
@@ -664,6 +786,7 @@ class V2OpenCodeProcess implements BackendProcess {
   private interruptPromise: Promise<void> | undefined;
   private readonly createsSession: boolean;
   private readonly onDiagnostic: LifecycleDiagnosticSink;
+  private repositoryRoot: string;
 
   constructor(
     private readonly invocation: BackendInvocation,
@@ -673,6 +796,7 @@ class V2OpenCodeProcess implements BackendProcess {
     this.sessionId = sessionId;
     this.createsSession = sessionId === undefined;
     this.onDiagnostic = options.onDiagnostic ?? defaultLifecycleDiagnostic;
+    this.repositoryRoot = invocation.repositoryRoot;
     this.exit = this.run();
   }
 
@@ -685,6 +809,9 @@ class V2OpenCodeProcess implements BackendProcess {
 
   private async run(): Promise<BackendExit> {
     try {
+      // Adapters are also callable directly by hosts/tests; do not rely on
+      // startWorkflow having canonicalized the path first.
+      this.repositoryRoot = await realpath(this.invocation.repositoryRoot);
       this.onDiagnostic({
         event: "run",
         backend: "v2-client",
@@ -694,7 +821,7 @@ class V2OpenCodeProcess implements BackendProcess {
       // This intentionally precedes both SDK calls: session.created and execution
       // events can be emitted synchronously by an embedded host.
       this.subscription = this.options.hostManager.registerEventConsumer({
-        location: { directory: this.invocation.repositoryRoot },
+        location: { directory: this.repositoryRoot },
         sessionId: this.sessionId,
         onEvent: (event) => {
           const value = event as unknown;
@@ -762,7 +889,7 @@ class V2OpenCodeProcess implements BackendProcess {
           const slash = model.indexOf("/");
           const creating = client.session.create(
             {
-              location: { directory: this.invocation.repositoryRoot },
+              ...locationInput(this.repositoryRoot),
               ...(profile ? { agent: profile } : {}),
               id: reservedId,
               ...(model

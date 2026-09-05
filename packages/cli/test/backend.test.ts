@@ -1,4 +1,8 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type {
   OpenCodeEvent,
@@ -9,6 +13,8 @@ import type {
 import {
   OpenCodeAdapter,
   V2OpenCodeAdapter,
+  V2PreflightError,
+  ensureV2AgentAvailable,
   normalizedV2,
   type BackendInvocation,
   type V2Client,
@@ -44,6 +50,27 @@ function stream(lines: string[]) {
       controller.close();
     },
   });
+}
+
+const temporaryRepos: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRepos
+      .splice(0)
+      .map((repositoryRoot) => rm(repositoryRoot, { recursive: true, force: true })),
+  );
+});
+
+async function tempGitRepo(): Promise<string> {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "factory-v2-test-"));
+  const git = Bun.spawn(["git", "init", "--quiet", repositoryRoot], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if ((await git.exited) !== 0) throw new Error("failed to initialize temporary Git repository");
+  temporaryRepos.push(repositoryRoot);
+  return realpath(repositoryRoot);
 }
 
 test("OpenCode builds the documented JSON run command and streams raw/normalized events", async () => {
@@ -311,6 +338,7 @@ test("kill and cancel are safe when child kill is absent or throws", async () =>
 });
 
 test("V2 registers event routing before creating one configured session and prompt", async () => {
+  const repositoryRoot = await tempGitRepo();
   const calls: string[] = [];
   let onEvent: ((event: UiHostEvent) => void) | undefined;
   const client = {
@@ -344,7 +372,7 @@ test("V2 registers event routing before creating one configured session and prom
     },
   });
   const process = adapter.start({
-    repositoryRoot: "/repo",
+    repositoryRoot,
     runId: "r",
     agent,
     model: "provider/requested-model",
@@ -359,7 +387,7 @@ test("V2 registers event routing before creating one configured session and prom
   expect(
     calls.some(
       (call) =>
-        call.startsWith('create:{"location":{"directory":"/repo"}') &&
+        call.startsWith(`create:{"location":{"directory":"${repositoryRoot}"}`) &&
         !call.includes('"agent"') &&
         call.includes('"providerID":"provider"') &&
         call.includes('"id":"requested-model"'),
@@ -372,7 +400,223 @@ test("V2 registers event routing before creating one configured session and prom
   ).toBe(true);
 });
 
+test("V2 preflight and sessions preserve two temporary repository locations", async () => {
+  const repositoryA = await tempGitRepo();
+  const repositoryB = await tempGitRepo();
+  const calls = {
+    location: [] as unknown[],
+    agents: [] as unknown[],
+    evict: [] as unknown[],
+    creates: [] as unknown[],
+  };
+  const consumers = new Map<string, (event: UiHostEvent) => void>();
+  const interrupted: string[] = [];
+  const waits = new Map<string, () => void>();
+  const client = {
+    location: {
+      get: async (input: unknown) => {
+        calls.location.push(input);
+        return {
+          directory: (input as any).location.directory,
+          project: { directory: (input as any).location.directory },
+        };
+      },
+    },
+    agent: {
+      list: async (input: unknown) => {
+        calls.agents.push(input);
+        return { location: (input as any).location, data: [{ id: "scout", name: "scout" }] };
+      },
+    },
+    debug: {
+      location: {
+        evict: async (input: unknown) => {
+          calls.evict.push(input);
+        },
+      },
+    },
+    message: { list: async () => ({ data: [] }) },
+    session: {
+      create: async (input: unknown) => {
+        calls.creates.push(input);
+        const id = `session-${(input as any).location.directory === repositoryA ? "A" : "B"}`;
+        return { id };
+      },
+      prompt: async () => {},
+      wait: async (input: { sessionID: string }) =>
+        new Promise<void>((resolve) => waits.set(input.sessionID, resolve)),
+      interrupt: async (input: { sessionID: string }) => {
+        interrupted.push(input.sessionID);
+        waits.get(input.sessionID)?.();
+      },
+    },
+  } as unknown as V2Client;
+  let firstA = true;
+  const originalList = client.agent.list;
+  client.agent.list = (async (input: unknown) => {
+    calls.agents.push(input);
+    if (input && (input as any).location.directory === repositoryA && firstA) {
+      firstA = false;
+      return { location: (input as any).location, data: [] };
+    }
+    return { location: (input as any).location, data: [{ id: "scout", name: "scout" }] };
+  }) as never;
+  await ensureV2AgentAvailable(client, repositoryA, "scout");
+  await ensureV2AgentAvailable(client, repositoryB, "scout");
+  expect(calls.location).toEqual([
+    { location: { directory: repositoryA } },
+    { location: { directory: repositoryA } },
+    { location: { directory: repositoryB } },
+  ]);
+  expect(calls.agents).toEqual([
+    { location: { directory: repositoryA } },
+    { location: { directory: repositoryA } },
+    { location: { directory: repositoryB } },
+  ]);
+  expect(calls.evict).toEqual([{ location: { directory: repositoryA } }]);
+  client.agent.list = originalList;
+  const manager = {
+    registerEventConsumer: (options: {
+      location: { directory: string };
+      onEvent: (event: UiHostEvent) => void;
+    }) => {
+      consumers.set(options.location.directory, options.onEvent);
+      return {
+        unsubscribe: () => void consumers.delete(options.location.directory),
+        droppedEvents: 0,
+      };
+    },
+    withHost: async <T>(operation: (value: V2Client) => Promise<T>) => operation(client),
+  };
+  const invocation = (root: string, runId: string, profile: string, model: string) => ({
+    repositoryRoot: root,
+    runId,
+    agent: { ...agent, adapterProfile: { opencodeAgent: profile } },
+    model,
+    systemPrompt: "system",
+    prompt: runId,
+  });
+  const processA = new V2OpenCodeAdapter({ client, hostManager: manager }).start(
+    invocation(repositoryA, "run-a", "scout-a", "provider/model-a"),
+  );
+  const processB = new V2OpenCodeAdapter({ client, hostManager: manager }).start(
+    invocation(repositoryB, "run-b", "scout-b", "provider/model-b"),
+  );
+  for (let i = 0; i < 1000 && calls.creates.length < 2; i++) await Bun.sleep(0);
+  expect(calls.creates).toHaveLength(2);
+  const createA = calls.creates.find(
+    (value: any) => value.location.directory === repositoryA,
+  ) as any;
+  const createB = calls.creates.find(
+    (value: any) => value.location.directory === repositoryB,
+  ) as any;
+  expect(createA).toEqual({
+    location: { directory: repositoryA },
+    agent: "scout-a",
+    id: expect.any(String),
+    model: { providerID: "provider", id: "model-a" },
+  });
+  expect(createB).toEqual({
+    location: { directory: repositoryB },
+    agent: "scout-b",
+    id: expect.any(String),
+    model: { providerID: "provider", id: "model-b" },
+  });
+  const idA = "session-A";
+  const idB = "session-B";
+  expect(idA).not.toBe(idB);
+  consumers.get(repositoryB)?.({
+    type: "session.text.delta",
+    data: { sessionID: idB, delta: "b" },
+  } as never);
+  consumers.get(repositoryA)?.({
+    type: "session.text.delta",
+    data: { sessionID: idA, delta: "a" },
+  } as never);
+  processA.cancel();
+  waits.get(idB)?.();
+  expect((await processA.exit).executionId).toBe(idA);
+  expect((await processB.exit).executionId).toBe(idB);
+  expect(interrupted).toEqual([idA]);
+});
+
+test("V2 preflight retry taxonomy preserves typed metadata and eviction boundaries", async () => {
+  const repositoryRoot = await tempGitRepo();
+  const cases = [
+    {
+      name: "mismatch",
+      response: { directory: "/wrong", project: { directory: "/wrong" } },
+      code: "V2_LOCATION_MISMATCH",
+      category: "location",
+      retryable: true,
+      evict: 1,
+    },
+    {
+      name: "missing agent",
+      response: { directory: repositoryRoot, project: { directory: repositoryRoot } },
+      code: "V2_AGENT_MISSING",
+      category: "agent",
+      retryable: true,
+      evict: 1,
+    },
+    {
+      name: "transport",
+      response: new Error("transport"),
+      code: "V2_LOCATION_TRANSPORT",
+      category: "transport",
+      retryable: false,
+      evict: 0,
+    },
+    {
+      name: "protocol",
+      response: { directory: repositoryRoot },
+      code: "V2_PROTOCOL_ERROR",
+      category: "protocol",
+      retryable: false,
+      evict: 0,
+    },
+  ] as const;
+  for (const item of cases) {
+    let evictions = 0;
+    const client = {
+      location: {
+        get: async () => {
+          if (item.response instanceof Error) throw item.response;
+          return item.response;
+        },
+      },
+      agent: { list: async () => ({ location: { directory: repositoryRoot }, data: [] }) },
+      debug: {
+        location: {
+          evict: async () => {
+            evictions++;
+          },
+        },
+      },
+    } as unknown as V2Client;
+    const result = ensureV2AgentAvailable(client, repositoryRoot, "scout");
+    await expect(result).rejects.toMatchObject({
+      code: item.code,
+      category: item.category,
+      retryable: item.retryable,
+    });
+    expect(evictions).toBe(item.evict);
+  }
+  const client = {
+    location: {
+      get: async () => ({ directory: repositoryRoot, project: { directory: repositoryRoot } }),
+    },
+    agent: { list: async () => ({ location: { directory: repositoryRoot }, data: [] }) },
+  } as unknown as V2Client;
+  await expect(ensureV2AgentAvailable(client, repositoryRoot, "scout")).rejects.toMatchObject({
+    code: "V2_LOCATION_RELOAD_FAILED",
+    category: "reload",
+    retryable: false,
+  });
+});
+
 test("V2 queue overflow is a session failure and does not interrupt another session", async () => {
+  const repositoryRoot = await tempGitRepo();
   const interrupted: string[] = [];
   const failures: Array<(error: UiHostManagerEventQueueOverflowError) => void> = [];
   let nextSession = 0;
@@ -410,10 +654,10 @@ test("V2 queue overflow is a session failure and does not interrupt another sess
     client: client as never,
     hostManager: manager as never,
   });
-  const first = adapter.start({ repositoryRoot: "/repo", runId: "overflow", agent, prompt: "x" });
+  const first = adapter.start({ repositoryRoot, runId: "overflow", agent, prompt: "x" });
   while (failures.length < 1) await Bun.sleep(0);
   failures[0](new UiHostManagerEventQueueOverflowError("overflow-1", 1));
-  const second = adapter.start({ repositoryRoot: "/repo", runId: "healthy", agent, prompt: "x" });
+  const second = adapter.start({ repositoryRoot, runId: "healthy", agent, prompt: "x" });
   expect((await second.exit).code).toBe(0);
   expect((await first.exit).code).toBeNull();
   expect(interrupted).toEqual(["overflow-1"]);
@@ -423,6 +667,7 @@ test("V2 queue overflow is a session failure and does not interrupt another sess
 });
 
 test("V2 lifecycle diagnostics identify prompt failures without payloads", async () => {
+  const repositoryRoot = await tempGitRepo();
   const diagnostics: unknown[] = [];
   const client = {
     message: emptyV2Messages,
@@ -444,7 +689,7 @@ test("V2 lifecycle diagnostics identify prompt failures without payloads", async
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
     hostManager: { registerEventConsumer: () => ({ unsubscribe() {}, droppedEvents: 0 }) } as never,
   }).start({
-    repositoryRoot: "/repo",
+    repositoryRoot,
     runId: "run-safe",
     agent,
     prompt: "secret user prompt",
@@ -466,6 +711,7 @@ test("V2 lifecycle diagnostics identify prompt failures without payloads", async
 });
 
 test("V2 does not leak pre-creation events from a concurrent session", async () => {
+  const repositoryRoot = await tempGitRepo();
   let onEvent: ((event: UiHostEvent) => void) | undefined;
   const client = {
     message: emptyV2Messages,
@@ -495,7 +741,7 @@ test("V2 does not leak pre-creation events from a concurrent session", async () 
       },
       withHost: async (operation) => operation(client as never),
     },
-  }).start({ repositoryRoot: "/repo", runId: "r", agent, prompt: "prompt" });
+  }).start({ repositoryRoot, runId: "r", agent, prompt: "prompt" });
   const events = [];
   for await (const event of process) events.push(event);
   expect(events.map((event) => event.executionId)).toEqual(["owned"]);
@@ -503,6 +749,7 @@ test("V2 does not leak pre-creation events from a concurrent session", async () 
 });
 
 test("V2 accepts a reserved session event without location before creation resolves", async () => {
+  const repositoryRoot = await tempGitRepo();
   let onEvent: ((event: UiHostEvent) => void) | undefined;
   let createInput: { id: string } | undefined;
   let resolveCreate!: (value: { id: string }) => void;
@@ -529,7 +776,7 @@ test("V2 accepts a reserved session event without location before creation resol
       withHost: async (operation) => operation(client as never),
     },
   });
-  const process = adapter.start({ repositoryRoot: "/repo", runId: "r", agent, prompt: "prompt" });
+  const process = adapter.start({ repositoryRoot, runId: "r", agent, prompt: "prompt" });
   while (!createInput || !onEvent) await Bun.sleep(0);
 
   onEvent({
@@ -545,6 +792,7 @@ test("V2 accepts a reserved session event without location before creation resol
 });
 
 test("V2 host stream failure fails the process and closes its iterator", async () => {
+  const repositoryRoot = await tempGitRepo();
   let onError: ((error: Error) => void) | undefined;
   const interrupted: string[] = [];
   let sessionId: string | undefined;
@@ -573,7 +821,7 @@ test("V2 host stream failure fails the process and closes its iterator", async (
       },
       withHost: async (operation) => operation(client as never),
     },
-  }).start({ repositoryRoot: "/repo", runId: "r", agent, prompt: "prompt" });
+  }).start({ repositoryRoot, runId: "r", agent, prompt: "prompt" });
   const events = [];
   for await (const event of process) events.push(event);
   expect((await process.exit).code).toBeNull();
@@ -583,6 +831,7 @@ test("V2 host stream failure fails the process and closes its iterator", async (
 });
 
 test("V2 continuation reuses the session and reconciles its latest stored assistant message", async () => {
+  const repositoryRoot = await tempGitRepo();
   const calls: string[] = [];
   let onEvent: ((event: UiHostEvent) => void) | undefined;
   const client = {
@@ -625,7 +874,7 @@ test("V2 continuation reuses the session and reconciles its latest stored assist
     client: client as never,
     hostManager: manager as never,
   }).start({
-    repositoryRoot: "/repo",
+    repositoryRoot,
     runId: "r",
     agent,
     prompt: "first",
@@ -639,6 +888,7 @@ test("V2 continuation reuses the session and reconciles its latest stored assist
 });
 
 test("V2 reconciliation uses an ID boundary, ascending pages, and owns corrections", async () => {
+  const repositoryRoot = await tempGitRepo();
   const prompts: string[] = [];
   const listInputs: Array<{ sessionID: string; order?: string; cursor?: string }> = [];
   const assistant = (id: string, created: number) =>
@@ -681,7 +931,7 @@ test("V2 reconciliation uses an ID boundary, ascending pages, and owns correctio
   const process = new V2OpenCodeAdapter({
     client: client as never,
     hostManager: manager as never,
-  }).start({ repositoryRoot: "/repo", runId: "boundary", agent, prompt: "initial" });
+  }).start({ repositoryRoot, runId: "boundary", agent, prompt: "initial" });
   await process.exit;
   const firstEvents: unknown[] = [];
   for await (const event of process) firstEvents.push(event);
@@ -704,6 +954,7 @@ test("V2 reconciliation uses an ID boundary, ascending pages, and owns correctio
 });
 
 test("V2 reconciliation does not reuse an old assistant when no new message is stored", async () => {
+  const repositoryRoot = await tempGitRepo();
   const assistant: SessionMessageAssistant = {
     id: "old",
     type: "assistant",
@@ -737,7 +988,7 @@ test("V2 reconciliation does not reuse an old assistant when no new message is s
       registerEventConsumer: () => ({ unsubscribe() {}, droppedEvents: 0 }),
       withHost: async () => client,
     } as never,
-  }).start({ repositoryRoot: "/repo", runId: "no-new", agent, prompt: "prompt" });
+  }).start({ repositoryRoot, runId: "no-new", agent, prompt: "prompt" });
   await process.exit;
   const events: unknown[] = [];
   for await (const event of process) events.push(event);
@@ -745,6 +996,7 @@ test("V2 reconciliation does not reuse an old assistant when no new message is s
 });
 
 test("V2 reconciliation reports message retrieval failures and cancellation", async () => {
+  const repositoryRoot = await tempGitRepo();
   let retrievalFailure = true;
   let resolveList!: () => void;
   const pendingList = new Promise<SessionMessagesResponse>((resolve) => {
@@ -780,7 +1032,7 @@ test("V2 reconciliation reports message retrieval failures and cancellation", as
     client: client as never,
     hostManager: manager as never,
   }).start({
-    repositoryRoot: "/repo",
+    repositoryRoot,
     runId: "retrieval-failure",
     agent,
     prompt: "prompt",
@@ -794,7 +1046,7 @@ test("V2 reconciliation reports message retrieval failures and cancellation", as
     client: client as never,
     hostManager: manager as never,
   }).start({
-    repositoryRoot: "/repo",
+    repositoryRoot,
     runId: "retrieval-cancel",
     agent,
     prompt: "prompt",
@@ -807,6 +1059,8 @@ test("V2 reconciliation reports message retrieval failures and cancellation", as
 });
 
 test("V2 cancellation interrupts only its session and remains safe when interrupt fails", async () => {
+  const firstRepositoryRoot = await tempGitRepo();
+  const secondRepositoryRoot = await tempGitRepo();
   const interrupted: string[] = [];
   const pending = new Promise<never>(() => {});
   let firstSession: string | undefined;
@@ -816,7 +1070,7 @@ test("V2 cancellation interrupts only its session and remains safe when interrup
       ...emptyV2Session,
 
       async create(input: { id: string; location: { directory: string } }) {
-        if (input.location.directory === "/one") firstSession = input.id;
+        if (input.location.directory === firstRepositoryRoot) firstSession = input.id;
         return { id: input.id } as never;
       },
       async prompt(input: { sessionID: string; text: string }) {
@@ -835,8 +1089,18 @@ test("V2 cancellation interrupts only its session and remains safe when interrup
     withHost: async (operation: (value: unknown) => Promise<unknown>) => operation(client),
   };
   const adapter = new V2OpenCodeAdapter({ client: client as never, hostManager: manager as never });
-  const first = adapter.start({ repositoryRoot: "/one", runId: "one", agent, prompt: "first" });
-  const second = adapter.start({ repositoryRoot: "/two", runId: "two", agent, prompt: "second" });
+  const first = adapter.start({
+    repositoryRoot: firstRepositoryRoot,
+    runId: "one",
+    agent,
+    prompt: "first",
+  });
+  const second = adapter.start({
+    repositoryRoot: secondRepositoryRoot,
+    runId: "two",
+    agent,
+    prompt: "second",
+  });
   expect((await second.exit).code).toBe(0);
   first.cancel();
   first.cancel();
@@ -845,6 +1109,7 @@ test("V2 cancellation interrupts only its session and remains safe when interrup
 });
 
 test("V2 cancellation before creation completes still settles and interrupts the late session", async () => {
+  const repositoryRoot = await tempGitRepo();
   let resolveCreate!: (value: { id: string }) => void;
   const interrupted: string[] = [];
   const client = {
@@ -872,11 +1137,12 @@ test("V2 cancellation before creation completes still settles and interrupts the
     client: client as never,
     hostManager: manager as never,
   }).start({
-    repositoryRoot: "/repo",
+    repositoryRoot,
     runId: "r",
     agent,
     prompt: "prompt",
   });
+  while (!resolveCreate) await Bun.sleep(0);
   process.cancel();
   const exit = process.exit;
   resolveCreate({ id: "late-session" });

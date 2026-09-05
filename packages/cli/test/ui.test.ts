@@ -103,6 +103,7 @@ function fakeSdkHost(directory: string) {
     agent: {
       async list() {
         return {
+          location: { directory },
           data: [
             { id: "scout", name: "scout" },
             { id: "plan-mission", name: "plan-mission" },
@@ -286,7 +287,10 @@ test("V2 agent preflight evicts only the repository location and reloads it", as
       list: async (input: { location: { directory: string } }) => {
         calls.push(`list:${input.location.directory}`);
         attempt += 1;
-        return { data: attempt === 1 ? [] : [{ id: "scout", name: "scout" }] };
+        return {
+          location: { directory },
+          data: attempt === 1 ? [] : [{ id: "scout", name: "scout" }],
+        };
       },
     },
     location: {
@@ -308,6 +312,40 @@ test("V2 agent preflight evicts only the repository location and reloads it", as
   expect(calls).toEqual([`list:${directory}`, `evict:${directory}`, `list:${directory}`]);
 });
 
+test("V2 workflow preflight failures are typed HTTP 502 responses without secret causes", async () => {
+  const root = await gitRepo();
+  const secret = "config-token-super-secret";
+  const client = {
+    location: {
+      get: async () => {
+        throw new Error(`${secret} raw transport failure`);
+      },
+    },
+    agent: { list: async () => ({ location: { directory: root }, data: [] }) },
+    debug: { location: { evict: async () => {} } },
+  } as unknown as V2Client;
+  const ui = await startUiServer({ repositoryRoot: root, port: 0, v2Client: client });
+  try {
+    const response = await fetch(new URL("/api/workflow-runs", ui.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflowId: "mission-planner", request: "inspect" }),
+    });
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: "OpenCode location preflight failed",
+      code: "V2_LOCATION_TRANSPORT",
+      category: "transport",
+      retryable: false,
+      details: { directory: root, cause: { errorClass: "Error" } },
+    });
+    expect(JSON.stringify(body)).not.toContain(secret);
+  } finally {
+    await ui.close();
+  }
+});
+
 test("V2 preflight rejects a location whose service path is not canonical-equivalent", async () => {
   const directory = await repo();
   await mkdir(join(directory, ".opencode"));
@@ -315,28 +353,33 @@ test("V2 preflight rejects a location whose service path is not canonical-equiva
     location: {
       get: async () => ({ directory: "/tmp/other", project: { directory: "/tmp/other" } }),
     },
-    agent: { list: async () => ({ data: [{ id: "scout", name: "scout" }] }) },
+    agent: {
+      list: async () => ({
+        location: { directory: "/tmp/other" },
+        data: [{ id: "scout", name: "scout" }],
+      }),
+    },
     config: {
       get: async () => [{ type: "document", path: join(directory, ".opencode"), info: {} }],
     },
     debug: { location: { evict: async () => {} } },
   } as unknown as V2Client;
-  await expect(ensureV2AgentAvailable(client, directory, "scout")).rejects.toThrow(
-    "location verification failed",
-  );
+  await expect(ensureV2AgentAvailable(client, directory, "scout")).rejects.toMatchObject({
+    code: "V2_LOCATION_MISMATCH",
+  });
 });
 
-test("V2 preflight fails closed when repository config is missing", async () => {
+test("V2 preflight does not require repository-local config", async () => {
   const directory = await repo();
   const client = {
     location: { get: async () => ({ directory, project: { directory } }) },
-    agent: { list: async () => ({ data: [{ id: "scout", name: "scout" }] }) },
+    agent: {
+      list: async () => ({ location: { directory }, data: [{ id: "scout", name: "scout" }] }),
+    },
     config: { get: async () => [] },
     debug: { location: { evict: async () => {} } },
   } as unknown as V2Client;
-  await expect(ensureV2AgentAvailable(client, directory, "scout")).rejects.toThrow(
-    "location verification failed",
-  );
+  await expect(ensureV2AgentAvailable(client, directory, "scout")).resolves.toBeUndefined();
 });
 
 test("V2 UI shutdown interrupts active sessions before closing the shared host", async () => {

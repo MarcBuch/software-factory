@@ -9,7 +9,13 @@ import {
   WorkflowsResponseSchema,
 } from "@software-factory/contracts";
 
-import { ensureV2AgentAvailable, OpenCodeAdapter, V2OpenCodeAdapter } from "./backend";
+import {
+  ensureV2AgentAvailable,
+  OpenCodeAdapter,
+  V2OpenCodeAdapter,
+  V2PreflightError,
+  type V2Client,
+} from "./backend";
 import {
   defaultLifecycleDiagnostic,
   errorDetails,
@@ -37,6 +43,8 @@ export type UiServerOptions = {
   /** Test seam for the shared service client. Production creates one manager per server. */
   hostManager?: UiHostManager;
   hostFactory?: UiHostFactory;
+  /** Test seam for an already-created V2 client. */
+  v2Client?: V2Client;
   launch?: (
     root: string,
     input: ReturnType<typeof validateWorkflowInput>,
@@ -133,9 +141,6 @@ export async function startUiServer(options: UiServerOptions) {
           ? undefined
           : new UiHostManager({
               factory: options.hostFactory,
-              options: {
-                config: { directory: repositoryRoot, project: true },
-              },
               onDiagnostic: options.onDiagnostic,
               shutdownGraceMs: options.shutdownGraceMs,
             })))
@@ -144,7 +149,11 @@ export async function startUiServer(options: UiServerOptions) {
     backend === "v1-cli"
       ? new OpenCodeAdapter()
       : hostManager
-        ? new V2OpenCodeAdapter({ hostManager, onDiagnostic: options.onDiagnostic })
+        ? new V2OpenCodeAdapter({
+            hostManager,
+            client: options.v2Client,
+            onDiagnostic: options.onDiagnostic,
+          })
         : undefined;
   const root = assetRoot(options);
   const stopRun = async (runId: string) => {
@@ -298,14 +307,21 @@ export async function startUiServer(options: UiServerOptions) {
                   ...(backend === "v2-client" && hostManager
                     ? {
                         beforeStart: () =>
-                          hostManager.withHost((client) =>
-                            ensureV2AgentAvailable(
-                              client,
-                              repositoryRoot,
-                              lookupRoster(input.agentName).opencodeAgent,
-                              options.onDiagnostic,
-                            ),
-                          ),
+                          options.v2Client
+                            ? ensureV2AgentAvailable(
+                                options.v2Client,
+                                repositoryRoot,
+                                lookupRoster(input.agentName).opencodeAgent,
+                                options.onDiagnostic,
+                              )
+                            : hostManager.withHost((client) =>
+                                ensureV2AgentAvailable(
+                                  client,
+                                  repositoryRoot,
+                                  lookupRoster(input.agentName).opencodeAgent,
+                                  options.onDiagnostic,
+                                ),
+                              ),
                       }
                     : {}),
                 });
@@ -339,6 +355,17 @@ export async function startUiServer(options: UiServerOptions) {
               (error instanceof Error && error.message === "Workflow already running")
             )
               return json({ error: "Workflow already running" }, 409);
+            if (error instanceof V2PreflightError)
+              return json(
+                {
+                  error: error.message,
+                  code: error.code,
+                  category: error.category,
+                  retryable: error.retryable,
+                  details: error.details,
+                },
+                502,
+              );
             return json({ error: error instanceof Error ? error.message : String(error) }, 400);
           }
         }
