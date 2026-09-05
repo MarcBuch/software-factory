@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import { execFile as childExecFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readlink, symlink, writeFile, lstat } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readlink,
+  symlink,
+  writeFile,
+  lstat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dirname } from "node:path";
@@ -61,6 +70,18 @@ test("rejects external untracked, excepts .factory", async () => {
   expect(await captureGitBoundary(options(root))).toBeTruthy();
   await writeFile(join(root, "surprise"), "x");
   await expect(captureGitBoundary(options(root))).rejects.toThrow("untracked");
+});
+
+test("empty untracked directories are outside the Git boundary", async () => {
+  const root = await repo();
+  await commit(root);
+  const empty = join(root, "empty", "nested");
+  await mkdir(empty, { recursive: true });
+  const snapshot = await captureGitBoundary(options(root));
+  await (await import("node:fs/promises")).rm(join(root, "empty"), { recursive: true });
+  expect((await compareGitBoundary(snapshot, options(root))).equal).toBe(true);
+  await restoreGitBoundary(snapshot, options(root));
+  await expect(lstat(empty)).rejects.toThrow();
 });
 
 test("runtime changes are ignored and created untracked files are removed", async () => {
@@ -183,4 +204,58 @@ test("failure injection produces private evidence and refuses evidence symlink",
   const ds = await lstat(runtime);
   expect(ds.mode & 0o7777).toBe(0o700);
   expect((await lstat(join(runtime, "boundary-snapshot.json"))).mode & 0o7777).toBe(0o600);
+});
+
+test("v3 evidence ignores a changed completion runtime directory", async () => {
+  const root = await repo();
+  await commit(root);
+  const runtime = join(root, ".factory", "run");
+  const redirected = join(root, "redirected-runtime");
+  await mkdir(runtime, { recursive: true });
+  const snapshot = await captureGitBoundary(options(root, runtime));
+  await writeFile(join(root, "file.txt"), "changed");
+  await expect(
+    restoreGitBoundary(snapshot, {
+      ...options(root, redirected),
+      restoreFailure: () => {
+        throw new Error("injected");
+      },
+    }),
+  ).rejects.toThrow();
+  expect(await readFile(join(runtime, "boundary-error.txt"), "utf8")).toContain("injected");
+  await expect(lstat(join(redirected, "boundary-error.txt"))).rejects.toThrow();
+});
+
+test("v2 path-only baseline fails closed without deleting its path", async () => {
+  const root = await repo();
+  await commit(root);
+  await writeFile(join(root, "old.txt"), "keep");
+  const v3 = await captureGitBoundary({ ...options(root), allowPreExistingUntracked: true });
+  const legacy = {
+    version: 2 as const,
+    repositoryRoot: v3.repositoryRoot,
+    index: v3.index,
+    tracked: v3.tracked,
+    untracked: ["old.txt"],
+  };
+  await writeFile(join(root, "old.txt"), "changed");
+  await writeFile(join(root, "new.txt"), "new");
+  await expect(restoreGitBoundary(legacy, options(root))).rejects.toThrow(
+    "recovery verification failed",
+  );
+  expect(await readFile(join(root, "old.txt"), "utf8")).toBe("changed");
+  await expect(lstat(join(root, "new.txt"))).rejects.toThrow();
+});
+
+test("allowed untracked snapshots include ancestor directory modes", async () => {
+  const root = await repo();
+  await commit(root);
+  await mkdir(join(root, "untracked", "nested"), { recursive: true });
+  await writeFile(join(root, "untracked", "nested", "file.txt"), "one");
+  await chmod(join(root, "untracked"), 0o751);
+  const snapshot = await captureGitBoundary({ ...options(root), allowPreExistingUntracked: true });
+  expect(snapshot.untracked.find((entry) => entry.path === "untracked")?.mode).toBe(0o751);
+  await chmod(join(root, "untracked"), 0o700);
+  await restoreGitBoundary(snapshot, options(root));
+  expect((await lstat(join(root, "untracked"))).mode & 0o7777).toBe(0o751);
 });

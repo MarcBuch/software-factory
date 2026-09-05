@@ -51,6 +51,16 @@ Workflow runtime data is under `.factory/runs/<run-id>/` (prompts, `result.json`
 
 Before execution, the generic workflow harness snapshots the Git worktree and compares/restores it afterward. Runtime paths under `.factory` are exempt from worktree path comparison, but staging/index mutations still violate the boundary. The worktree must not have pre-existing untracked files outside that runtime directory; an exclusive-access assumption is required because concurrent edits or untracked-file changes can be rejected or complicate restoration. This is a boundary check, not a security guarantee.
 
+When explicitly allowing pre-existing untracked content, the v3 snapshot records
+file contents, symlink targets, modes, and every discoverable ancestor directory
+without following symlinks. Git does not report empty untracked directories, so
+they are intentionally outside this boundary and are not claimed to be
+preserved; the implementation does not perform a potentially dangerous full
+repository walk (which could include ignored/vendor data). Legacy v2
+path-only snapshots are accepted explicitly but fail closed and never delete,
+overwrite, or restore those baseline paths. New-untracked cleanup is lstat/
+symlink-safe and revalidates parents immediately before mutation.
+
 Workflow scope is intentionally narrow. It does not plan, run tests, create commits, perform retries beyond the single correction continuation, create handoffs, or resume a session later.
 
 ## UI OpenCode service and v2-client rollout
