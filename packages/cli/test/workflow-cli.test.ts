@@ -282,10 +282,10 @@ test("planner rejects an external plan write before draft creation", async () =>
   expect(await readFile(join(p.dir, ".factory", "plans.jsonl"), "utf8")).toBe(plans);
 });
 
-test("planner refuses to persist a draft without codebase exploration", async () => {
+test("planner succeeds without a codebase-explorer event", async () => {
   const p = await repo(
     await fakeScript(
-      `const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Missing exploration",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"Architecture"}],notes:[],plan:{missionTitle:"Missing exploration",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   const result = await run(
@@ -293,18 +293,15 @@ test("planner refuses to persist a draft without codebase exploration", async ()
     ["workflow", "run", "--agent", "planner", "plan it", "--json"],
     p.env,
   );
-  expect(result.code).toBe(1);
-  expect(JSON.parse(result.stdout).run.failure).toMatchObject({
-    code: "WORKFLOW_FAILURE",
-    message: "Planner must delegate to codebase-explorer",
-  });
-  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).accepted).toBe(true);
+  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(true);
 });
 
-test("planner refuses a failed codebase exploration", async () => {
+test("planner succeeds with failed and unrelated tool events", async () => {
   const p = await repo(
     await fakeScript(
-      `console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"error",input:{subagent_type:"codebase-explorer"},output:"exploration failed"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"error",input:{subagent_type:"codebase-explorer"},output:"exploration failed"}}})); console.log(JSON.stringify({type:"tool_use",part:{tool:"skill",callID:"other",state:{status:"error",input:{name:"unrelated"},output:"ignored"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"Architecture"}],notes:[],plan:{missionTitle:"Failed exploration",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   const result = await run(
@@ -312,17 +309,15 @@ test("planner refuses a failed codebase exploration", async () => {
     ["workflow", "run", "--agent", "planner", "plan it", "--json"],
     p.env,
   );
-  expect(result.code).toBe(1);
-  expect(JSON.parse(result.stdout).run.failure.message).toBe(
-    "Planner must delegate to codebase-explorer",
-  );
-  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).accepted).toBe(true);
+  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(true);
 });
 
-test("planner refuses to persist a draft without visualize-change", async () => {
+test("planner succeeds without a visualize-change event", async () => {
   const p = await repo(
     await fakeScript(
-      `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head></head><body></body></html>"); console.log(JSON.stringify({type:"tool_use",part:{tool:"task",callID:"explore",state:{status:"completed",input:{subagent_type:"codebase-explorer"},output:"findings"}}})); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"Architecture"}],notes:[],plan:{missionTitle:"Missing skill",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+      `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[{path:".factory/architecture/"+run+".html",kind:"architecture",description:"Architecture"}],notes:[],plan:{missionTitle:"Missing skill",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
     ),
   );
   const result = await run(
@@ -330,11 +325,9 @@ test("planner refuses to persist a draft without visualize-change", async () => 
     ["workflow", "run", "--agent", "planner", "plan it", "--json"],
     p.env,
   );
-  expect(result.code).toBe(1);
-  expect(JSON.parse(result.stdout).run.failure.message).toBe(
-    "Planner must complete the visualize-change skill",
-  );
-  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(false);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).accepted).toBe(true);
+  expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(true);
 });
 
 test("planner cleans up its generated artifact when draft creation fails", async () => {

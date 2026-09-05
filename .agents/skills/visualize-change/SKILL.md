@@ -5,7 +5,7 @@ description: Author a precise standalone HTML technical architecture brief for a
 
 # Visualize Change
 
-After repository exploration, directly author one standalone HTML document. In Factory planner runs write only the exact run-context path `.factory/architecture/<run-id>.html`; in normal standalone use write to the caller-specified repository-relative `.html` path. Never return structured architecture data as a substitute.
+After repository exploration when available, directly author one standalone HTML document. Exploration and this skill are recommended techniques, not mandatory Factory acceptance gates. In Factory planner runs write only the exact run-context path `.factory/architecture/<run-id>.html`; in normal standalone use write to the caller-specified repository-relative `.html` path. Never return structured architecture data as a substitute for the exact validated artifact.
 
 ## Evidence rule
 
@@ -19,4 +19,4 @@ The HTML must be self-contained, responsive, accessible, printable, and reasonab
 
 ## Planning integration
 
-The planner first delegates to `codebase-explorer`, then loads this skill and writes the exact artifact. It returns the complete plan under `plan` and exactly one `artifacts` declaration whose path is `.factory/architecture/<run-id>.html` (kind `architecture`). Factory validates, attaches, persists, and never renders or rewrites HTML. Normal standalone callers may specify another safe repository-relative `.html` output path.
+The planner may delegate to `codebase-explorer`, then may load this skill and write the exact artifact. It returns the complete plan under `plan` and exactly one `artifacts` declaration whose path is `.factory/architecture/<run-id>.html` (kind `architecture`). Factory acceptance is based on that valid structured result and exact validated artifact bytes, not on delegation or skill-use events. Factory validates, attaches, persists, and never renders or rewrites HTML. Normal standalone callers may specify another safe repository-relative `.html` output path.

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { OpenCodeAdapter, normalizedV2 } from "../src/backend";
 import { parseFinalAssistantResult } from "../src/completion";
+import { normalizePlannerExternalArtifacts } from "../src/planner-actions";
 import {
   BUILTIN_ROSTER_VERSION,
   RESULT_INSTRUCTIONS,
@@ -30,6 +31,40 @@ test("effective run definition rejects a malformed snapshot", () => {
       agent: { id: "builder", version: 1, provenance: "builtin", prompt: "credential" },
     }),
   ).toThrow();
+});
+
+test("planner normalizes external artifacts around its architecture artifact", () => {
+  const architecture = ".factory/architecture/run.html";
+  const description = "Architecture";
+  const cases = [
+    {
+      input: [
+        { path: "notes.md", label: "Notes" },
+        { path: architecture },
+        { path: architecture, label: description },
+        { path: "notes.md", label: "Notes" },
+        { path: "guide.md", label: "Guide" },
+      ],
+      expected: [
+        { path: "notes.md", label: "Notes" },
+        { path: architecture, label: description },
+        { path: "guide.md", label: "Guide" },
+      ],
+    },
+    {
+      input: [{ path: architecture }],
+      expected: [{ path: architecture, label: description }],
+    },
+  ];
+  for (const { input, expected } of cases)
+    expect(normalizePlannerExternalArtifacts(input, architecture, description)).toEqual(expected);
+  expect(() =>
+    normalizePlannerExternalArtifacts(
+      [{ path: architecture, label: "Wrong" }],
+      architecture,
+      description,
+    ),
+  ).toThrow(/label conflict/);
 });
 
 function liveV2Event(type: string, data: Record<string, unknown>) {
@@ -274,7 +309,7 @@ test("planner roster renders a delegated, workflow-persisted draft plan prompt",
   const rendered = renderAgentPrompts("planner", "Plan notifications");
   expect(rendered.systemPrompt).toContain("codebase-explorer");
   expect(rendered.systemPrompt).toContain("visualize-change");
-  expect(rendered.systemPrompt).toContain("codebase-explorer");
+  expect(rendered.systemPrompt).toContain("recommended guidance");
   expect(rendered.systemPrompt).toContain("result.plan");
   expect(rendered.systemPrompt).toContain("write the exact run artifact");
   expect(rendered.systemPrompt).toContain("appends its pln_ ID");
@@ -284,7 +319,7 @@ test("planner roster renders a delegated, workflow-persisted draft plan prompt",
   );
   expect(rendered.systemPrompt).toContain("Do not approve, materialize, revise, archive");
   expect(rendered.systemPrompt).not.toContain("Do not include planning");
-  expect(rendered.userPrompt).toContain("load visualize-change");
+  expect(rendered.userPrompt).toContain("Write the exact expectedArtifactPath");
 });
 
 test("OpenCode adapter adds the roster OpenCode agent", async () => {

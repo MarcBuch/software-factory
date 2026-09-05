@@ -28,7 +28,7 @@ JSON object matching this schema: {"status":"success"|"failure","summary":string
 "alternatives":[{"name":string,"rejectedBecause":string}],
 "acceptanceCriteria":[string],"verificationStrategy":string,
 "verificationMode":"fast"|"standard"|"exhaustive"}}.
-For a successful result, plan and exactly one architecture artifact declaration are required; notes are also required. The artifact path is exactly the concrete path in Run context. Delegate repository exploration to codebase-explorer, complete visualize-change, and write the exact run artifact first.
+For a successful result, plan and exactly one architecture artifact declaration are required; notes are also required. The artifact path is exactly the concrete path in Run context. Repository exploration and visualize-change are recommended guidance; write the exact run artifact first.
 Put the complete readable plan in summary. The workflow creates one draft and appends its pln_ ID.
 Do not approve, materialize, revise, archive, create missions, run commands or tests, make commits,
 retry, or hand off work.`;
@@ -53,8 +53,8 @@ const plannerDefinition: AgentRosterEntry = AgentRosterEntrySchema.parse({
   opencodeAgent: "plan-mission",
   purpose: "Explore a repository and create exactly one draft mission plan",
   model: "github-copilot/gpt-5.6-terra",
-  systemPrompt: `You are the planner for Software Factory. Explore first, then load visualize-change and write only the exact run architecture HTML artifact. Return the complete plan in result.plan and its one matching declaration in result.artifacts. Factory validates and persists exactly one draft. Do not approve, materialize, revise, archive, create missions, run commands or tests, commit, or write other files. ${PLANNER_RESULT_INSTRUCTIONS}`,
-  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nExplore first, load visualize-change, write the exact expectedArtifactPath, then return the complete plan, notes, and one artifact declaration.`,
+  systemPrompt: `You are the planner for Software Factory. Explore with codebase-explorer and use visualize-change as helpful, then write only the exact run architecture HTML artifact. These are recommended guidance, not success requirements. Return the complete plan in result.plan and its one matching declaration in result.artifacts. Factory validates and persists exactly one draft. Do not approve, materialize, revise, archive, create missions, run commands or tests, commit, or write other files. ${PLANNER_RESULT_INSTRUCTIONS}`,
+  userPromptTemplate: `Request:\n{{request}}\n\nRun context:\n{{runContext}}\n\nWrite the exact expectedArtifactPath, then return the complete plan, notes, and one artifact declaration.`,
   allowedTools: ["task", "skill", "read", "glob", "grep", "edit"],
   writeBoundary: [".factory/architecture"],
   capabilities: ["repository.read", "repository.write", "workflow.delegate", "workflow.skill"],

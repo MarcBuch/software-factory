@@ -209,6 +209,7 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Classifies explorer tool events for observability; it is not an acceptance gate. */
 export function delegatedExplorer(outcome: WorkflowOutcome) {
   const starts = new Set<string>();
   const failed = new Set<string>();
@@ -272,6 +273,7 @@ export function delegatedExplorer(outcome: WorkflowOutcome) {
   return false;
 }
 
+/** Classifies visualization tool events for observability; it is not an acceptance gate. */
 export function completedVisualization(outcome: WorkflowOutcome) {
   const started = new Set<string>();
   const failed = new Set<string>();
@@ -773,8 +775,6 @@ async function completeWorkflow(args: {
               architectureState,
               validateArchitectureArtifact,
               architectureMutated,
-              delegatedExplorer: (value: any) => delegatedExplorer(value),
-              completedVisualization: (value: any) => completedVisualization(value),
               initialFactoryState,
               factoryState: () => factoryState(root),
               restoreFactoryState: (state, expected) => {

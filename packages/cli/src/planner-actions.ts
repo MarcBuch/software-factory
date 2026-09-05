@@ -3,6 +3,43 @@ import { join } from "node:path";
 import { createDraftPlan } from "./plans";
 import { type AgentResult } from "./workflow";
 
+type PlannerExternalArtifact = NonNullable<
+  NonNullable<AgentResult["plan"]>["externalArtifacts"]
+>[number];
+
+/** Normalize planner-supplied artifacts before either validating or persisting them. */
+export function normalizePlannerExternalArtifacts(
+  artifacts: readonly PlannerExternalArtifact[],
+  architecturePath: string,
+  architectureDescription: string,
+): PlannerExternalArtifact[] {
+  const normalized: PlannerExternalArtifact[] = [];
+  const byPath = new Map<string, PlannerExternalArtifact>();
+  for (const artifact of artifacts) {
+    if (artifact.path === architecturePath) {
+      if (artifact.label !== undefined && artifact.label !== architectureDescription)
+        throw Error(`Planner external artifact label conflict for ${artifact.path}`);
+      if (!byPath.has(artifact.path)) {
+        const canonical = { path: architecturePath, label: architectureDescription };
+        byPath.set(artifact.path, canonical);
+        normalized.push(canonical);
+      }
+      continue;
+    }
+    const previous = byPath.get(artifact.path);
+    if (previous) {
+      if (previous.label !== artifact.label)
+        throw Error(`Planner external artifact label conflict for ${artifact.path}`);
+      continue;
+    }
+    byPath.set(artifact.path, artifact);
+    normalized.push(artifact);
+  }
+  if (!byPath.has(architecturePath))
+    normalized.push({ path: architecturePath, label: architectureDescription });
+  return normalized;
+}
+
 export type PlannerActionContext = {
   root: string;
   runId: string;
@@ -16,8 +53,6 @@ export type PlannerActionContext = {
     after: Readonly<Record<string, string>>,
     runFile: string,
   ) => boolean;
-  delegatedExplorer: (result: { events: readonly any[] }) => boolean;
-  completedVisualization: (result: { events: readonly any[] }) => boolean;
   initialFactoryState: { plans: { content?: string }; missions: { content?: string } };
   factoryState: () => Promise<{ plans: { content?: string }; missions: { content?: string } }>;
   restoreFactoryState: (state: any, expected: any) => Promise<void>;
@@ -64,10 +99,6 @@ export function plannerActions(context: PlannerActionContext) {
     }
     await assertExpected(postState);
     await restoreInitial(postState);
-    if (!context.delegatedExplorer(context.outcome))
-      throw Error("Planner must delegate to codebase-explorer");
-    if (!context.completedVisualization(context.outcome))
-      throw Error("Planner must complete the visualize-change skill");
     if (!context.result.plan) throw Error("Planner must return a complete plan input");
   };
   const artifact = async () => {
@@ -81,12 +112,11 @@ export function plannerActions(context: PlannerActionContext) {
       declarations[0]!.path !== path
     )
       throw Error("Planner must declare exactly one matching architecture artifact");
-    const external = result.plan?.externalArtifacts ?? [];
-    if (
-      external.some((item) => item.path === path) ||
-      new Set(external.map((item) => item.path)).size !== external.length
-    )
-      throw Error("Planner must not duplicate the architecture artifact in plan.externalArtifacts");
+    normalizePlannerExternalArtifacts(
+      result.plan?.externalArtifacts ?? [],
+      path,
+      declarations[0]!.description,
+    );
     const after = await context.architectureState(context.root);
     if (
       context.architectureMutated(context.initialArchitectureState, after, `${context.runId}.html`)
@@ -107,16 +137,15 @@ export function plannerActions(context: PlannerActionContext) {
     if (!context.result.plan) throw Error("Planner must return a complete plan input");
     const path = join(context.root, ".factory", "plans.jsonl");
     const artifact = context.result.artifacts[0]!;
+    const architecturePath = join(".factory", "architecture", `${context.runId}.html`);
     const plan = await createDraftPlan(
       {
         ...context.result.plan,
-        externalArtifacts: [
-          ...(context.result.plan.externalArtifacts ?? []),
-          {
-            path: join(".factory", "architecture", `${context.runId}.html`),
-            label: artifact.description,
-          },
-        ],
+        externalArtifacts: normalizePlannerExternalArtifacts(
+          context.result.plan.externalArtifacts ?? [],
+          architecturePath,
+          artifact.description,
+        ),
       },
       path,
       context.root,
