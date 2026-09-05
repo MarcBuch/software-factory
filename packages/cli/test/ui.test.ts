@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AgentsResponseSchema } from "@software-factory/contracts";
+import {
+  AgentsResponseSchema,
+  WorkflowLaunchResponseSchema,
+  WorkflowsResponseSchema,
+} from "@software-factory/contracts";
 
 import { ensureV2AgentAvailable, type V2Client } from "../src/backend";
 import { createDraftPlan, PLAN_INPUT_EXAMPLE, savePlans } from "../src/plans";
@@ -154,6 +158,59 @@ test("UI server exposes the ordered agent catalog without prompts", async () => 
       expect(agent).not.toHaveProperty("userPromptTemplate");
       expect(JSON.stringify(agent)).not.toMatch(/prompt/i);
     }
+  } finally {
+    await ui.close();
+  }
+});
+
+test("workflow API launches by workflow and preserves the sessions API", async () => {
+  const root = await gitRepo();
+  const launches: Array<{ request: string; agentName: string }> = [];
+  const storage = await openWorkflowStorage(root);
+  const run = await storage.createRun({
+    systemPrompt: "s",
+    userPrompt: "u",
+    metadata: { request: "x", agentName: "planner" },
+    stages: BUILTIN_REGISTRY[1]!.workflow.stages,
+  });
+  storage.startRun(run.id);
+  const active = storage.getRun(run.id)!;
+  storage.close();
+  const ui = await startUiServer({
+    repositoryRoot: root,
+    port: 0,
+    launch: async (_, input) => {
+      launches.push(input);
+      return { run: active, completion: Promise.resolve(active) };
+    },
+  });
+  try {
+    const catalog = WorkflowsResponseSchema.parse(
+      await (await fetch(new URL("/api/workflows", ui.url))).json(),
+    );
+    expect(catalog.workflows[1]?.stages.map((stage) => stage.id)).toEqual(
+      BUILTIN_REGISTRY[1]!.workflow.stages.map((stage) => stage.id),
+    );
+    const launched = await fetch(new URL("/api/workflow-runs", ui.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflowId: "mission-planner", request: "x" }),
+    });
+    expect(launched.status).toBe(202);
+    expect(WorkflowLaunchResponseSchema.parse(await launched.json()).run.stages).toHaveLength(4);
+    expect(launches).toContainEqual({ request: "x", agentName: "planner" });
+    const unknown = await fetch(new URL("/api/workflow-runs", ui.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflowId: "missing", request: "x" }),
+    });
+    expect(unknown.status).toBe(400);
+    const legacy = await fetch(new URL("/api/sessions", ui.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ request: "x", agentName: "planner" }),
+    });
+    expect(legacy.status).toBe(202);
   } finally {
     await ui.close();
   }

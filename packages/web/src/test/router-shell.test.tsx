@@ -76,6 +76,16 @@ const run = {
   metadata: { request: "Inspect the repository" },
   startedAt: "2026-01-01T00:00:00.000Z",
   finishedAt: "2026-01-01T00:00:01.000Z",
+  stages: [
+    {
+      id: "scout",
+      kind: "agent",
+      ordinal: 0,
+      status: "succeeded",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      finishedAt: "2026-01-01T00:00:01.000Z",
+    },
+  ],
 };
 const summary = {
   usage: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 3 },
@@ -139,6 +149,21 @@ function setup(initialEntry = "/runs") {
                 description: "Read-only research",
                 placeholder: "What should the scout inspect?",
                 detail: "READ-ONLY RESEARCH",
+              },
+            ],
+          }),
+        );
+      if (path.endsWith("/api/workflows"))
+        return Promise.resolve(
+          jsonResponse({
+            workflows: [
+              {
+                id: "repository-scout",
+                version: 1,
+                agent: "scout",
+                stages: [{ id: "scout", kind: "agent", agent: "scout", label: "Repository scout" }],
+                label: "Scout",
+                description: "Inspect the repository",
               },
             ],
           }),
@@ -207,6 +232,14 @@ describe("router shell", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Launch session" }));
     await waitFor(() => expect(router.history.location.pathname).toBe("/runs/run-1"));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/workflow-runs",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ request: "Launch this workflow", workflowId: "repository-scout" }),
+      }),
+    );
+    expect(await screen.findByText("succeeded")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /delete session/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /delete session/i }));
     fireEvent.click(await screen.findByRole("button", { name: "Delete session" }));

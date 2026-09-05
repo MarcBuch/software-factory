@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import type { LaunchAgent, Run } from "@/workflow/workflow-context";
+import type { Run } from "@/workflow/workflow-context";
 const date = (v?: string) =>
   v
     ? new Date(v).toLocaleString(undefined, {
@@ -24,41 +24,41 @@ export function List({
   hasMore,
   launching,
   onLaunch,
-  agents,
-  agentsLoading,
-  agentsError,
+  workflows,
+  workflowsLoading,
+  workflowsError,
 }: {
   runs: Run[];
   onSelect: (id: string) => void;
   onMore: () => void;
   hasMore: boolean;
   launching: boolean;
-  onLaunch: (request: string, agentName: LaunchAgent) => Promise<void>;
-  agents: Array<{
+  onLaunch: (request: string, workflowId: string) => Promise<void>;
+  workflows: Array<{
     id: string;
-    purpose: string;
+    description: string;
     label: string;
     detail: string;
     placeholder: string;
   }>;
-  agentsLoading: boolean;
-  agentsError?: string;
+  workflowsLoading: boolean;
+  workflowsError?: string;
 }) {
   const [request, setRequest] = useState("");
-  const [agentName, setAgentName] = useState<LaunchAgent>("scout");
-  const available = agentsLoading || agentsError ? [] : agents;
-  const selected = available.find((item) => item.id === agentName) ?? available[0];
-  const agent = selected;
+  const [workflowId, setWorkflowId] = useState("repository-scout");
+  const available = workflowsLoading || workflowsError ? [] : workflows;
+  const selected = available.find((item) => item.id === workflowId) ?? available[0];
+  const workflow = selected;
   useEffect(() => {
-    if (selected && selected.id !== agentName) setAgentName(selected.id);
-  }, [agentName, selected]);
+    if (selected && selected.id !== workflowId) setWorkflowId(selected.id);
+  }, [workflowId, selected]);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const value = request.trim();
     if (!value || launching) return;
-    if (!agent) return;
+    if (!workflow) return;
     try {
-      await onLaunch(value, agentName);
+      await onLaunch(value, workflowId);
       setRequest("");
     } catch {}
   };
@@ -71,38 +71,38 @@ export function List({
               <div>
                 <h2>Launch workflow</h2>
                 <span>
-                  {agent
-                    ? `${agent.label.toUpperCase()} · ${agent.detail}`
-                    : agentsLoading
-                      ? "Loading agents…"
-                      : agentsError
-                        ? "Agents unavailable"
-                        : "No agents available"}
+                  {workflow
+                    ? `${workflow.label.toUpperCase()} · ${workflow.detail}`
+                    : workflowsLoading
+                      ? "Loading workflows…"
+                      : workflowsError
+                        ? "Workflows unavailable"
+                        : "No workflows available"}
                 </span>
               </div>
               <Button
                 type="submit"
                 disabled={
-                  launching || !request.trim() || !selected || agentsLoading || !!agentsError
+                  launching || !request.trim() || !selected || workflowsLoading || !!workflowsError
                 }
               >
                 {launching ? "Launching…" : "Launch session"}
               </Button>
             </div>
             <label className="launch-agent">
-              <span>Agent {agentsLoading ? "(loading…)" : ""}</span>
-              {agentsError ? <small role="alert">{agentsError}</small> : null}
-              {!agentsLoading && !agentsError && !available.length ? (
-                <small>No agents available.</small>
+              <span>Workflow {workflowsLoading ? "(loading…)" : ""}</span>
+              {workflowsError ? <small role="alert">{workflowsError}</small> : null}
+              {!workflowsLoading && !workflowsError && !available.length ? (
+                <small>No workflows available.</small>
               ) : null}
               <select
-                value={agentName}
-                onChange={(e) => setAgentName(e.target.value)}
-                disabled={launching || agentsLoading || !!agentsError || !available.length}
+                value={workflowId}
+                onChange={(e) => setWorkflowId(e.target.value)}
+                disabled={launching || workflowsLoading || !!workflowsError || !available.length}
               >
                 {available.map((item) => (
                   <option value={item.id} key={item.id}>
-                    {item.id} - {item.purpose}
+                    {item.id} - {item.description}
                   </option>
                 ))}
               </select>
@@ -110,7 +110,7 @@ export function List({
             <Textarea
               value={request}
               onChange={(e) => setRequest(e.target.value)}
-              placeholder={agent?.placeholder ?? "Select an available agent"}
+              placeholder={workflow?.placeholder ?? "Select an available workflow"}
               aria-label="Workflow request"
               disabled={launching}
             />
@@ -142,6 +142,17 @@ export function List({
                 </div>
                 <h3>{String((r.metadata as { request?: string })?.request || r.id)}</h3>
                 <code>{r.id}</code>
+                {r.stages?.length ? (
+                  <div className="mt-2 flex flex-wrap gap-1" aria-label="Workflow stages">
+                    {[...r.stages]
+                      .sort((a, b) => a.ordinal - b.ordinal)
+                      .map((stage) => (
+                        <Badge key={stage.id} variant="outline">
+                          {stage.id}: {stage.status}
+                        </Badge>
+                      ))}
+                  </div>
+                ) : null}
                 <Separator />
                 <div className="card-foot">
                   <span>{duration(r.startedAt, r.finishedAt)}</span>

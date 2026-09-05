@@ -34,6 +34,39 @@ export const WorkflowInputSchema = z
   .object({ request: nonEmptyText, agentName: nonEmptyText })
   .strict();
 
+/** Ordered workflow stages; workflows are deliberately not generic DAGs. */
+export const WorkflowStageDefinitionSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      id: nonEmptyText,
+      kind: z.literal("agent"),
+      agent: nonEmptyText,
+      label: nonEmptyText,
+    })
+    .strict(),
+  z
+    .object({
+      id: nonEmptyText,
+      kind: z.literal("action"),
+      action: nonEmptyText,
+      label: nonEmptyText,
+    })
+    .strict(),
+]);
+export type WorkflowStageDefinition = z.infer<typeof WorkflowStageDefinitionSchema>;
+export const WorkflowStageRecordSchema = z
+  .object({
+    id: nonEmptyText,
+    kind: z.enum(["agent", "action"]),
+    ordinal: z.number().int().nonnegative(),
+    status: z.enum(["pending", "running", "succeeded", "failed", "cancelled", "skipped"]),
+    startedAt: z.string().datetime({ offset: true }).optional(),
+    finishedAt: z.string().datetime({ offset: true }).optional(),
+    failure: z.string().optional(),
+  })
+  .strict();
+export type WorkflowStageRecord = z.infer<typeof WorkflowStageRecordSchema>;
+
 export const AgentRosterEntrySchema = z
   .object({
     name: nonEmptyText,
@@ -66,6 +99,8 @@ export const EffectiveRunDefinitionSchema = z
         version: z.number().int().positive(),
         agent: nonEmptyText,
         provenance: z.literal("builtin"),
+        // Optional when reading legacy definition snapshots; all new builtins include it.
+        stages: z.array(WorkflowStageDefinitionSchema).min(1).readonly().optional(),
       })
       .strict(),
     runtime: z
@@ -82,6 +117,8 @@ export const EffectiveRunDefinitionSchema = z
       .object({
         capabilities: z.array(AgentCapabilitySchema).readonly(),
         writeBoundary: z.array(RepositoryRelativePathSchema).readonly(),
+        // Legacy run definitions did not persist this explicit boundary policy.
+        allowPreExistingUntracked: z.boolean().optional(),
       })
       .strict(),
   })

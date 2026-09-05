@@ -174,6 +174,49 @@ export const RunFailureSchema = z
   .strict();
 
 export const RunStatusSchema = z.enum(["pending", "running", "succeeded", "failed", "cancelled"]);
+export const StageStatusSchema = z.enum([
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "skipped",
+]);
+export const StageRecordSchema = z
+  .object({
+    id: text,
+    ordinal: z.number().int().nonnegative(),
+    kind: z.enum(["agent", "action"]),
+    status: StageStatusSchema,
+    startedAt: iso.optional(),
+    finishedAt: iso.optional(),
+    failure: text.optional(),
+  })
+  .strict()
+  .superRefine((stage, context) => {
+    if (stage.status === "pending" && (stage.startedAt || stage.finishedAt || stage.failure))
+      context.addIssue({ code: "custom", message: "Pending stages cannot have lifecycle details" });
+    if (stage.status === "running" && (!stage.startedAt || stage.finishedAt || stage.failure))
+      context.addIssue({ code: "custom", message: "Running stages require startedAt only" });
+    if (["cancelled", "skipped"].includes(stage.status) && (!stage.finishedAt || stage.failure))
+      context.addIssue({
+        code: "custom",
+        message: "Cancelled and skipped stages require finishedAt and no failure",
+      });
+    if (stage.status === "succeeded" && (!stage.startedAt || !stage.finishedAt || stage.failure))
+      context.addIssue({
+        code: "custom",
+        message: "Succeeded stages require timestamps and no failure",
+      });
+    if (stage.status === "failed" && (!stage.startedAt || !stage.finishedAt || !stage.failure))
+      context.addIssue({ code: "custom", message: "Failed stages require timestamps and failure" });
+    if (
+      stage.startedAt &&
+      stage.finishedAt &&
+      Date.parse(stage.finishedAt) < Date.parse(stage.startedAt)
+    )
+      context.addIssue({ code: "custom", message: "finishedAt must be >= startedAt" });
+  });
 export const RunSchema = z
   .object({
     id: text,
@@ -185,6 +228,7 @@ export const RunSchema = z
       .object({ request: text.optional(), agentName: text.optional() })
       .strict()
       .optional(),
+    stages: z.array(StageRecordSchema).optional(),
   })
   .strict()
   .superRefine((run, context) => {
@@ -284,6 +328,10 @@ export const TracePageSchema = z
   })
   .strict();
 export const LaunchRequestSchema = z.object({ request: text, agentName: text }).strict();
+export const WorkflowLaunchRequestSchema = z.object({ workflowId: text, request: text }).strict();
+export const WorkflowLaunchResponseSchema = z
+  .object({ accepted: z.literal(true), run: RunSchema })
+  .strict();
 export const LaunchResponseSchema = z
   .object({ accepted: z.literal(true), run: RunSchema })
   .strict();
@@ -318,11 +366,33 @@ export const AgentSummarySchema = z
   })
   .strict();
 export const AgentsResponseSchema = z.object({ agents: z.array(AgentSummarySchema) }).strict();
+export const WorkflowStageDefinitionSchema = z.discriminatedUnion("kind", [
+  z.object({ id: text, kind: z.literal("agent"), agent: text, label: text }).strict(),
+  z.object({ id: text, kind: z.literal("action"), action: text, label: text }).strict(),
+]);
+export const WorkflowSummarySchema = z
+  .object({
+    id: text,
+    version: z.number().int().positive(),
+    agent: text,
+    stages: z.array(WorkflowStageDefinitionSchema),
+    label: text,
+    description: text,
+  })
+  .strict();
+export const WorkflowsResponseSchema = z
+  .object({ workflows: z.array(WorkflowSummarySchema) })
+  .strict();
 
 export type Run = z.infer<typeof RunSchema>;
+export type StageRecord = z.infer<typeof StageRecordSchema>;
+export type WorkflowLaunchRequest = z.infer<typeof WorkflowLaunchRequestSchema>;
+export type WorkflowLaunchResponse = z.infer<typeof WorkflowLaunchResponseSchema>;
 export type DeletePlanResponse = z.infer<typeof DeletePlanResponseSchema>;
 export type AgentCapability = z.infer<typeof AgentCapabilitySchema>;
 export type AgentSummary = z.infer<typeof AgentSummarySchema>;
+export type WorkflowStageDefinition = z.infer<typeof WorkflowStageDefinitionSchema>;
+export type WorkflowSummary = z.infer<typeof WorkflowSummarySchema>;
 export type AgentLaunch = string;
 export type RunFailure = z.infer<typeof RunFailureSchema>;
 export type TokenUsage = z.infer<typeof TokenUsageSchema>;

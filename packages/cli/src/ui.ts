@@ -2,7 +2,12 @@ import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import { join, normalize, relative } from "node:path";
 
-import { AgentsResponseSchema, DeletePlanResponseSchema } from "@software-factory/contracts";
+import {
+  AgentsResponseSchema,
+  DeletePlanResponseSchema,
+  WorkflowLaunchResponseSchema,
+  WorkflowsResponseSchema,
+} from "@software-factory/contracts";
 
 import { ensureV2AgentAvailable, OpenCodeAdapter, V2OpenCodeAdapter } from "./backend";
 import {
@@ -94,6 +99,7 @@ const publicRun = (run: Awaited<ReturnType<WorkflowStorage["getRun"]>>): PublicR
       ...(typeof metadata.request === "string" ? { request: metadata.request } : {}),
       ...(typeof metadata.agentName === "string" ? { agentName: metadata.agentName } : {}),
     },
+    ...(run.stages ? { stages: run.stages } : {}),
   };
 };
 
@@ -213,6 +219,19 @@ export async function startUiServer(options: UiServerOptions) {
               })),
             }),
           );
+        if (request.method === "GET" && path === "/api/workflows")
+          return json(
+            WorkflowsResponseSchema.parse({
+              workflows: BUILTIN_REGISTRY.map((entry) => ({
+                id: entry.workflow.id,
+                version: entry.workflow.version,
+                agent: entry.workflow.agent,
+                stages: entry.workflow.stages,
+                label: entry.ui.label,
+                description: entry.ui.description,
+              })),
+            }),
+          );
         if (request.method === "GET" && path === "/api/plans") {
           const plans = await withFactoryLock(repositoryRoot, async () => {
             await recoverFactoryTransaction(repositoryRoot);
@@ -248,10 +267,25 @@ export async function startUiServer(options: UiServerOptions) {
             return json({ error: message }, /not found/i.test(message) ? 404 : 500);
           }
         }
-        if (path === "/api/sessions" && request.method === "POST") {
+        if (
+          (path === "/api/sessions" || path === "/api/workflow-runs") &&
+          request.method === "POST"
+        ) {
           let input: ReturnType<typeof validateWorkflowInput>;
           try {
-            input = validateWorkflowInput(await request.json());
+            const body = await request.json();
+            if (path === "/api/workflow-runs") {
+              if (!body || typeof body !== "object" || typeof body.workflowId !== "string")
+                throw new Error("workflowId is required");
+              const workflow = BUILTIN_REGISTRY.find(
+                (entry) => entry.workflow.id === body.workflowId,
+              );
+              if (!workflow) throw new Error(`Unknown workflow: ${body.workflowId}`);
+              input = validateWorkflowInput({
+                request: body.request,
+                agentName: workflow.agent.name,
+              });
+            } else input = validateWorkflowInput(body);
             lookupRegistry(input.agentName);
           } catch (error) {
             return json({ error: error instanceof Error ? error.message : String(error) }, 400);
@@ -295,7 +329,10 @@ export async function startUiServer(options: UiServerOptions) {
                 },
                 500,
               );
-            return json({ accepted: true, run: publicRun(launch.run) }, 202);
+            return json(
+              WorkflowLaunchResponseSchema.parse({ accepted: true, run: publicRun(launch.run) }),
+              202,
+            );
           } catch (error) {
             if (
               error instanceof WorkflowAlreadyRunning ||

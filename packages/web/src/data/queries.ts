@@ -1,6 +1,6 @@
 import {
-  LaunchRequestSchema,
   AgentsResponseSchema,
+  WorkflowsResponseSchema,
   LaunchResponseSchema,
   DeleteResponseSchema,
   DeletePlanResponseSchema,
@@ -33,6 +33,29 @@ export type TracePage = {
   publicRun?: Run;
 };
 export type LaunchAgent = string;
+export const workflowsQuery = () =>
+  useQuery({
+    queryKey: ["workflows"],
+    queryFn: async () => {
+      try {
+        return await apiSchema("/api/workflows", WorkflowsResponseSchema);
+      } catch {
+        // Keep older service builds usable while the workflow endpoint rolls
+        // out; new services never take this branch.
+        const legacy = await apiSchema("/api/agents", AgentsResponseSchema);
+        return {
+          workflows: legacy.agents.map((agent) => ({
+            id: agent.id,
+            version: agent.version,
+            agent: agent.id,
+            stages: [],
+            label: agent.label,
+            description: agent.purpose,
+          })),
+        };
+      }
+    },
+  });
 
 export const agentsQuery = () =>
   useQuery({
@@ -131,11 +154,11 @@ export function useTrace(id: string) {
 export function useLaunch() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (input: { request: string; agentName: LaunchAgent }) =>
-      apiSchema("/api/sessions", LaunchResponseSchema, {
+    mutationFn: (input: { request: string; workflowId: string }) =>
+      apiSchema("/api/workflow-runs", LaunchResponseSchema, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(LaunchRequestSchema.parse(input)),
+        body: JSON.stringify(input),
       }),
     onSuccess: (response) => {
       updateSessions(client, response.run);

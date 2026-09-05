@@ -3,14 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
 import { ApiError } from "@/data/api";
-import {
-  useDelete,
-  useLaunch,
-  useSessions,
-  useSse,
-  useTrace,
-  type LaunchAgent,
-} from "@/data/queries";
+import { useDelete, useLaunch, useSessions, useSse, useTrace } from "@/data/queries";
 export type { LaunchAgent } from "@/data/queries";
 
 export type Event = TraceEventApi;
@@ -31,7 +24,7 @@ type State = {
   run?: Run;
   load: (before?: number) => void;
   loadTrace: (id: string, after?: number) => void;
-  launch: (request: string, agent: LaunchAgent) => Promise<void>;
+  launch: (request: string, workflowId: string) => Promise<void>;
   deleteSelected: () => Promise<void>;
   setSelected: (id?: string) => void;
 };
@@ -76,8 +69,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
           if (after !== undefined) void traceQuery.fetchNextPage();
           else void traceQuery.refetch();
         },
-        launch: async (request, agentName) => {
-          const response = await launch.mutateAsync({ request, agentName });
+        launch: async (request, workflowId) => {
+          const response = await launch.mutateAsync({ request, workflowId });
           void navigate({ to: "/runs/$runId", params: { runId: response.run.id } });
         },
         deleteSelected: async () => {

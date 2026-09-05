@@ -120,6 +120,60 @@ test("migrates a pre-migration database and can be opened repeatedly", async () 
   second.close();
 });
 
+test("migrates legacy stage ordinals and makes ordered terminal transitions atomic", async () => {
+  const root = await databaseRoot();
+  const database = new Database(join(root, ".factory", "workflow.sqlite"));
+  database.exec(`
+    CREATE TABLE runs (id TEXT PRIMARY KEY, repository_root TEXT NOT NULL, status TEXT NOT NULL,
+      started_at TEXT, finished_at TEXT, failure_json TEXT, system_prompt_path TEXT NOT NULL,
+      user_prompt_path TEXT NOT NULL, raw_stream_path TEXT NOT NULL, result_path TEXT NOT NULL,
+      metadata_path TEXT NOT NULL);
+    CREATE TABLE workflow_stages (run_id TEXT NOT NULL, stage_id TEXT NOT NULL, kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', started_at TEXT, finished_at TEXT, failure TEXT,
+      PRIMARY KEY (run_id, stage_id));
+    INSERT INTO workflow_stages(run_id, stage_id, kind) VALUES ('legacy', 'one', 'agent'), ('legacy', 'two', 'action');
+  `);
+  database.close();
+  const migrated = await openWorkflowStorage(root);
+  expect(
+    migrated.database.query<{ user_version: number }, []>("PRAGMA user_version").get()
+      ?.user_version,
+  ).toBe(2);
+  expect(migrated.database.query("PRAGMA index_list(workflow_stages)").all()).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: "workflow_stages_run_ordinal", unique: 1 }),
+    ]),
+  );
+  expect(
+    migrated.database
+      .query("SELECT stage_id, ordinal FROM workflow_stages WHERE run_id='legacy' ORDER BY ordinal")
+      .all(),
+  ).toEqual([
+    { stage_id: "one", ordinal: 0 },
+    { stage_id: "two", ordinal: 1 },
+  ]);
+  migrated.close();
+  const storage = await openWorkflowStorage(root);
+  const run = await storage.createRun({
+    systemPrompt: "s",
+    userPrompt: "u",
+    stages: [
+      { id: "one", kind: "agent", agent: "a", label: "A" },
+      { id: "two", kind: "action", action: "x", label: "X" },
+    ],
+  });
+  storage.startRun(run.id);
+  expect(() => storage.transitionStage(run.id, "two", "running")).toThrow("in order");
+  storage.transitionStage(run.id, "one", "running");
+  storage.transitionStage(run.id, "one", "succeeded");
+  expect(() => storage.transitionStage(run.id, "one", "running")).toThrow("terminal");
+  storage.transitionStage(run.id, "two", "running");
+  expect(storage.requestCancellation(run.id).accepted).toBe(true);
+  expect(storage.finishRun(run.id, "succeeded")?.status).toBe("cancelled");
+  expect(storage.finishRun(run.id, "succeeded")?.status).toBe("cancelled");
+  storage.close();
+});
+
 test("migrates a partially migrated database without re-adding columns", async () => {
   const root = await databaseRoot();
   const database = new Database(join(root, ".factory", "workflow.sqlite"));

@@ -14,6 +14,9 @@ import {
   EffectiveRunDefinitionSchema,
   type AgentResult,
   type EffectiveRunDefinition,
+  type WorkflowStageDefinition,
+  type WorkflowStageRecord,
+  WorkflowStageRecordSchema,
 } from "./workflow";
 
 const mode = 0o600;
@@ -42,6 +45,7 @@ export type RunRecord = Omit<Run, "metadata"> & {
   cancellationRequested?: boolean;
   /** Metadata captured at creation time (request/agent are included by the CLI). */
   metadata?: unknown;
+  stages?: WorkflowStageRecord[];
 };
 
 export type RunPage = Readonly<{
@@ -67,12 +71,14 @@ export type ChangeToken = Readonly<{
 }>;
 export type PublicRun = Pick<Run, "id" | "status" | "startedAt" | "finishedAt" | "failure"> & {
   metadata?: { request?: string; agentName?: string };
+  stages?: WorkflowStageRecord[];
 };
 
 export type RunInit = {
   systemPrompt: string;
   userPrompt: string;
   metadata?: unknown;
+  stages?: readonly WorkflowStageDefinition[];
 };
 
 export type AgentProcess = {
@@ -127,7 +133,7 @@ export class WorkflowStorage {
     const version =
       this.database.query<{ user_version: number }, []>("PRAGMA user_version").get()
         ?.user_version ?? 0;
-    if (version < 1) {
+    if (version < 2) {
       this.database.transaction(() => {
         this.database.exec(`
           CREATE TABLE IF NOT EXISTS runs (
@@ -138,11 +144,17 @@ export class WorkflowStorage {
              child_pid INTEGER, session_id TEXT, process_identity TEXT, execution_kind TEXT,
              cancellation_requested INTEGER NOT NULL DEFAULT 0
           );
-          CREATE TABLE IF NOT EXISTS agents (
+           CREATE TABLE IF NOT EXISTS agents (
             run_id TEXT NOT NULL, agent_name TEXT NOT NULL, started_at TEXT, finished_at TEXT,
             child_pid INTEGER, session_id TEXT, PRIMARY KEY (run_id, agent_name),
             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-          );
+           );
+           CREATE TABLE IF NOT EXISTS workflow_stages (
+             run_id TEXT NOT NULL, stage_id TEXT NOT NULL, kind TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'pending', started_at TEXT, finished_at TEXT,
+             failure TEXT, PRIMARY KEY (run_id, stage_id),
+             FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+           );
           CREATE TABLE IF NOT EXISTS trace_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL,
             type TEXT NOT NULL, agent_name TEXT, tool TEXT, status TEXT, payload_json TEXT NOT NULL,
@@ -153,19 +165,46 @@ export class WorkflowStorage {
           );
            CREATE INDEX IF NOT EXISTS trace_events_run ON trace_events(run_id, id);
            CREATE INDEX IF NOT EXISTS runs_newest ON runs(id, started_at DESC);
-          PRAGMA user_version = 1;
-        `);
+         `);
+        this.database.exec(`CREATE TABLE IF NOT EXISTS workflow_stages (
+          run_id TEXT NOT NULL, stage_id TEXT NOT NULL, ordinal INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending', started_at TEXT, finished_at TEXT,
+          failure TEXT, PRIMARY KEY (run_id, stage_id),
+          FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+        )`);
+        this.addColumnIfMissing("workflow_stages", "ordinal", "ordinal INTEGER NOT NULL DEFAULT 0");
+        const duplicateRuns = this.database
+          .query<{ run_id: string }, []>(
+            "SELECT run_id FROM workflow_stages GROUP BY run_id HAVING COUNT(*) > 1 AND COUNT(DISTINCT ordinal) < COUNT(*)",
+          )
+          .all();
+        for (const { run_id } of duplicateRuns) {
+          const rows = this.database
+            .query<{ rowid: number }, [string]>(
+              "SELECT rowid FROM workflow_stages WHERE run_id=? ORDER BY rowid",
+            )
+            .all(run_id);
+          rows.forEach((row, ordinal) =>
+            this.database
+              .query("UPDATE workflow_stages SET ordinal=? WHERE rowid=?")
+              .run(ordinal, row.rowid),
+          );
+        }
+        this.database.exec(
+          "CREATE UNIQUE INDEX IF NOT EXISTS workflow_stages_run_ordinal ON workflow_stages(run_id, ordinal)",
+        );
+        this.addColumnIfMissing("runs", "process_identity", "process_identity TEXT");
+        this.addColumnIfMissing("runs", "execution_kind", "execution_kind TEXT");
+        this.addColumnIfMissing(
+          "runs",
+          "cancellation_requested",
+          "cancellation_requested INTEGER NOT NULL DEFAULT 0",
+        );
+        for (const column of ["reasoning_tokens", "cache_read_tokens", "cache_write_tokens"]) {
+          this.addColumnIfMissing("trace_events", column, `${column} INTEGER`);
+        }
+        this.database.exec("PRAGMA user_version = 2");
       })();
-    }
-    this.addColumnIfMissing("runs", "process_identity", "process_identity TEXT");
-    this.addColumnIfMissing("runs", "execution_kind", "execution_kind TEXT");
-    this.addColumnIfMissing(
-      "runs",
-      "cancellation_requested",
-      "cancellation_requested INTEGER NOT NULL DEFAULT 0",
-    );
-    for (const column of ["reasoning_tokens", "cache_read_tokens", "cache_write_tokens"]) {
-      this.addColumnIfMissing("trace_events", column, `${column} INTEGER`);
     }
   }
 
@@ -178,6 +217,9 @@ export class WorkflowStorage {
   }
 
   async createRun(input: RunInit): Promise<RunRecord> {
+    const stages = input.stages ?? [];
+    if (new Set(stages.map((stage) => stage.id)).size !== stages.length)
+      throw new Error("Workflow stages must have unique ids");
     const id = runId();
     const directory = join(this.factoryDirectory, "runs", id);
     try {
@@ -197,24 +239,82 @@ export class WorkflowStorage {
       await atomic(files.rawStream, "");
       // result.json is created only after a valid structured result is received.
       await atomic(files.metadata, JSON.stringify(input.metadata ?? {}, null, 2) + "\n");
-      this.database
-        .query(`INSERT INTO runs
+      this.database.transaction(() => {
+        this.database
+          .query(`INSERT INTO runs
         (id, repository_root, status, system_prompt_path, user_prompt_path, raw_stream_path, result_path, metadata_path)
         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`)
-        .run(
-          id,
-          this.root,
-          files.systemPrompt,
-          files.userPrompt,
-          files.rawStream,
-          files.result,
-          files.metadata,
+          .run(
+            id,
+            this.root,
+            files.systemPrompt,
+            files.userPrompt,
+            files.rawStream,
+            files.result,
+            files.metadata,
+          );
+        stages.forEach((stage, ordinal) =>
+          this.database
+            .query(
+              "INSERT INTO workflow_stages(run_id, stage_id, ordinal, kind) VALUES (?, ?, ?, ?)",
+            )
+            .run(id, stage.id, ordinal, stage.kind),
         );
+      })();
       return this.getRun(id)!;
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  /** Guarded ordered-stage transition; terminal stages cannot be rewritten. */
+  transitionStage(
+    runId: string,
+    stageId: string,
+    status: WorkflowStageRecord["status"],
+    failure?: string,
+    at = iso(),
+  ) {
+    return this.database.transaction(() => {
+      const current = this.database
+        .query<any, [string, string]>(
+          "SELECT rowid, * FROM workflow_stages WHERE run_id=? AND stage_id=?",
+        )
+        .get(runId, stageId);
+      if (!current) throw Error(`Stage not found: ${stageId}`);
+      if (["succeeded", "failed", "cancelled", "skipped"].includes(current.status))
+        throw Error(`Cannot transition terminal stage: ${stageId}`);
+      if (status === "running" && current.status !== "pending")
+        throw Error(`Stage is not pending: ${stageId}`);
+      if (["succeeded", "failed", "cancelled"].includes(status) && current.status !== "running")
+        throw Error(`Only running stages may finish: ${stageId}`);
+      if (status === "skipped" && current.status !== "pending")
+        throw Error(`Only pending stages may be skipped: ${stageId}`);
+      const run = this.database
+        .query<{ status: string }, [string]>("SELECT status FROM runs WHERE id=?")
+        .get(runId);
+      if (!run || run.status !== "running")
+        throw Error(`Cannot transition stage on non-running run: ${runId}`);
+      if (status === "running") {
+        const previous = this.database
+          .query<{ status: string }, [string, number]>(
+            "SELECT status FROM workflow_stages WHERE run_id=? AND ordinal < ? ORDER BY ordinal",
+          )
+          .all(runId, current.ordinal);
+        if (previous.some((stage) => stage.status !== "succeeded"))
+          throw Error(`Workflow stages must run in order: ${stageId}`);
+      }
+      const started = status === "running" ? (current.started_at ?? at) : current.started_at;
+      const finished = ["succeeded", "failed", "cancelled", "skipped"].includes(status) ? at : null;
+      const result = this.database
+        .query(
+          "UPDATE workflow_stages SET status=?, started_at=?, finished_at=?, failure=? WHERE run_id=? AND stage_id=? AND status NOT IN ('succeeded','failed','cancelled','skipped')",
+        )
+        .run(status, started ?? null, finished, failure ?? null, runId, stageId);
+      if (result.changes !== 1) throw Error(`Invalid stage transition: ${stageId}`);
+      return this.getRun(runId);
+    })();
   }
 
   async writeDefinition(runId: string, definition: EffectiveRunDefinition) {
@@ -272,6 +372,16 @@ export class WorkflowStorage {
         if (finished?.status === "running") throw Error(`Cannot finish run: ${id}`);
         return;
       }
+      this.database
+        .query(
+          "UPDATE workflow_stages SET status='skipped', finished_at=?, failure=NULL WHERE run_id=? AND status='pending'",
+        )
+        .run(at, id);
+      this.database
+        .query(
+          "UPDATE workflow_stages SET status=?, finished_at=?, failure=? WHERE run_id=? AND status='running'",
+        )
+        .run(finalStatus, at, finalFailure?.message ?? null, id);
       this.appendTrace({ runId: id, at, type: "run_finished", status: finalStatus });
       finished = this.getRun(id);
     })();
@@ -461,6 +571,28 @@ export class WorkflowStorage {
       ...(executionKind ? { executionKind } : {}),
       ...(row.cancellation_requested ? { cancellationRequested: true } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
+      ...(this.database
+        .query<any, [string]>("SELECT * FROM workflow_stages WHERE run_id=? ORDER BY rowid")
+        .all(row.id).length
+        ? {
+            stages: this.database
+              .query<any, [string]>(
+                "SELECT * FROM workflow_stages WHERE run_id=? ORDER BY ordinal, rowid",
+              )
+              .all(row.id)
+              .map((stage) =>
+                WorkflowStageRecordSchema.parse({
+                  id: stage.stage_id,
+                  ordinal: stage.ordinal ?? stage.rowid,
+                  kind: stage.kind,
+                  status: stage.status,
+                  ...(stage.started_at ? { startedAt: stage.started_at } : {}),
+                  ...(stage.finished_at ? { finishedAt: stage.finished_at } : {}),
+                  ...(stage.failure ? { failure: stage.failure } : {}),
+                }),
+              ),
+          }
+        : {}),
     };
     return run;
   }

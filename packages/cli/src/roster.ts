@@ -1,6 +1,7 @@
 import type { AgentCapability } from "@software-factory/contracts";
 
 import { AgentResultSchema, AgentRosterEntrySchema, type AgentRosterEntry } from "./workflow";
+import type { WorkflowStageDefinition } from "./workflow";
 
 /** Shared wire protocol for the final agent response. Markers must occupy lines by themselves. */
 export const FACTORY_RESULT_START = "---FACTORY_RESULT_JSON---";
@@ -61,7 +62,13 @@ const plannerDefinition: AgentRosterEntry = AgentRosterEntrySchema.parse({
 
 export type BuiltinRegistryEntry = Readonly<{
   agent: AgentRosterEntry;
-  workflow: { id: string; version: number; agent: string; provenance: "builtin" };
+  workflow: {
+    id: string;
+    version: number;
+    agent: string;
+    provenance: "builtin";
+    stages: readonly WorkflowStageDefinition[];
+  };
   runtime: {
     id: string;
     capabilities: readonly AgentCapability[];
@@ -69,13 +76,20 @@ export type BuiltinRegistryEntry = Readonly<{
     profile?: Readonly<Record<string, unknown>>;
   };
   completionContract: "factory-result-json-v1";
+  policy: { allowPreExistingUntracked: boolean };
   ui: { label: string; description: string; placeholder: string; detail: string };
 }>;
 
 export const BUILTIN_REGISTRY: readonly BuiltinRegistryEntry[] = Object.freeze([
   {
     agent: scoutDefinition,
-    workflow: { id: "repository-scout", version: 1, agent: "scout", provenance: "builtin" },
+    workflow: {
+      id: "repository-scout",
+      version: 1,
+      agent: "scout",
+      provenance: "builtin",
+      stages: [{ id: "scout", kind: "agent", agent: "scout", label: "Repository scout" }],
+    },
     runtime: {
       id: "opencode",
       capabilities: scoutDefinition.capabilities ?? ["repository.read"],
@@ -83,6 +97,7 @@ export const BUILTIN_REGISTRY: readonly BuiltinRegistryEntry[] = Object.freeze([
       profile: { opencodeAgent: scoutDefinition.opencodeAgent },
     },
     completionContract: "factory-result-json-v1",
+    policy: { allowPreExistingUntracked: true },
     ui: {
       label: "Scout",
       description: scoutDefinition.purpose,
@@ -92,7 +107,33 @@ export const BUILTIN_REGISTRY: readonly BuiltinRegistryEntry[] = Object.freeze([
   },
   {
     agent: plannerDefinition,
-    workflow: { id: "mission-planner", version: 1, agent: "planner", provenance: "builtin" },
+    workflow: {
+      id: "mission-planner",
+      version: 1,
+      agent: "planner",
+      provenance: "builtin",
+      stages: [
+        { id: "planner", kind: "agent", agent: "planner", label: "Mission planner" },
+        {
+          id: "planner-evidence",
+          kind: "action",
+          action: "persist-planner-evidence",
+          label: "Persist planner evidence",
+        },
+        {
+          id: "planner-artifact",
+          kind: "action",
+          action: "validate-architecture-artifact",
+          label: "Validate architecture artifact",
+        },
+        {
+          id: "planner-draft",
+          kind: "action",
+          action: "persist-draft-plan",
+          label: "Persist draft plan",
+        },
+      ],
+    },
     runtime: {
       id: "opencode",
       capabilities: plannerDefinition.capabilities ?? [
@@ -105,6 +146,7 @@ export const BUILTIN_REGISTRY: readonly BuiltinRegistryEntry[] = Object.freeze([
       profile: { opencodeAgent: plannerDefinition.opencodeAgent },
     },
     completionContract: "factory-result-json-v1",
+    policy: { allowPreExistingUntracked: false },
     ui: {
       label: "Planner",
       description: plannerDefinition.purpose,

@@ -3,14 +3,16 @@ import { mkdir, open, readFile, rename, rm, lstat, readdir, realpath } from "nod
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { AgentExecutor, type AgentExecutorLike } from "./agent-executor";
 import type { AgentRuntimeAdapter, BackendProcess } from "./agent-runtime";
 import { OpenCodeAdapter, type V2Client } from "./backend";
-import { completeAgent } from "./completion";
+import type { CompletionOutcome } from "./completion";
 import { captureGitBoundary, compareGitBoundary, restoreGitBoundary } from "./git-boundary";
-import { createDraftPlan } from "./plans";
+import { plannerActions } from "./planner-actions";
 import { lookupRegistry, lookupRoster, renderAgentPrompts } from "./roster";
 import { recoverFactoryTransaction, replaceFactoryPair, withFactoryLock } from "./storage";
-import { WorkflowInputSchema, type WorkflowInput } from "./workflow";
+import { EffectiveRunDefinitionSchema, WorkflowInputSchema, type WorkflowInput } from "./workflow";
+import { WorkflowRunner } from "./workflow-runner";
 import { openWorkflowStorage, type RunRecord } from "./workflow-storage";
 
 const exec = promisify(execFile);
@@ -27,6 +29,7 @@ export type WorkflowLaunch = {
 
 export type WorkflowServiceOptions = {
   adapter?: AgentRuntimeAdapter;
+  executorFactory?: (adapter: AgentRuntimeAdapter) => AgentExecutorLike;
   /** Runs after the repository lock is acquired and before a run is persisted. */
   beforeStart?: () => Promise<void>;
 };
@@ -44,7 +47,7 @@ export function validateRuntimeRequirements(
     );
 }
 
-type WorkflowOutcome = Awaited<ReturnType<typeof completeAgent>>;
+type WorkflowOutcome = CompletionOutcome;
 type WorkflowFailure = NonNullable<RunRecord["failure"]>;
 type WorkflowLock = { release: () => Promise<void> };
 
@@ -479,24 +482,13 @@ async function terminalFailure(
 
 async function enforceGitBoundary(
   boundary: Awaited<ReturnType<typeof captureGitBoundary>>,
-  root: string,
+  boundaryOptions: Parameters<typeof compareGitBoundary>[1],
 ) {
-  const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
+  const comparison = await compareGitBoundary(boundary, boundaryOptions);
   if (comparison.equal) return { comparison, failure: undefined, restorationFailure: undefined };
   const failure = `Git boundary violation: ${JSON.stringify(comparison)}`;
   try {
-    await restoreGitBoundary(boundary, {
-      repositoryRoot: root,
-      runtimeDirectory: join(root, ".factory"),
-      ...(process.env.FACTORY_TEST_RESTORE_FAILURE
-        ? {
-            restoreFailure: (step: string) => {
-              if (step === process.env.FACTORY_TEST_RESTORE_FAILURE)
-                throw Error(`Injected restoration failure: ${step}`);
-            },
-          }
-        : {}),
-    });
+    await restoreGitBoundary(boundary, boundaryOptions, boundaryOptions);
     return { comparison, failure, restorationFailure: undefined };
   } catch (error) {
     return { comparison, failure, restorationFailure: errorMessage(error) };
@@ -526,7 +518,21 @@ export async function startWorkflow(
   try {
     await options.beforeStart?.();
     storage = await openWorkflowStorage(root);
-    const boundary = await captureGitBoundary({ repositoryRoot: root });
+    const allowPreExistingUntracked = registry.policy.allowPreExistingUntracked;
+    const boundaryOptions = Object.freeze({
+      repositoryRoot: root,
+      runtimeDirectory: join(root, ".factory"),
+      allowPreExistingUntracked,
+      ...(process.env.FACTORY_TEST_RESTORE_FAILURE
+        ? {
+            restoreFailure: (step: string) => {
+              if (step === process.env.FACTORY_TEST_RESTORE_FAILURE)
+                throw Error(`Injected restoration failure: ${step}`);
+            },
+          }
+        : {}),
+    });
+    const boundary = await captureGitBoundary(boundaryOptions);
     const initialFactoryState = await factoryState(root);
     const initialArchitectureState = await architectureState(root);
     const preliminary = renderAgentPrompts(agent.name, parsed.request, {});
@@ -538,6 +544,7 @@ export async function startWorkflow(
         agentName: agent.name,
         request: parsed.request,
       },
+      stages: registry.workflow.stages,
     });
     const prompts = renderAgentPrompts(agent.name, parsed.request, {
       runId: run.id,
@@ -559,6 +566,7 @@ export async function startWorkflow(
       policy: {
         capabilities: registry.runtime.capabilities,
         writeBoundary: agent.writeBoundary,
+        allowPreExistingUntracked,
       },
       completionContract: registry.completionContract,
     });
@@ -591,14 +599,11 @@ export async function startWorkflow(
       // the process.
       let message = errorMessage(error);
       try {
-        const comparison = await compareGitBoundary(boundary, { repositoryRoot: root });
+        const comparison = await compareGitBoundary(boundary, boundaryOptions);
         if (!comparison.equal) {
           message = `BACKEND_FAILURE; Git boundary violation: ${JSON.stringify(comparison)}`;
           try {
-            await restoreGitBoundary(boundary, {
-              repositoryRoot: root,
-              runtimeDirectory: join(root, ".factory"),
-            });
+            await restoreGitBoundary(boundary, boundaryOptions, boundaryOptions);
           } catch (restoreError) {
             message += `; Boundary restoration failed: ${errorMessage(restoreError)}`;
           }
@@ -653,6 +658,9 @@ export async function startWorkflow(
       initialArchitectureState,
       root,
       lock,
+      adapter,
+      executorFactory: options.executorFactory,
+      boundaryOptions,
     });
     return { run, completion };
   } catch (error) {
@@ -679,6 +687,9 @@ async function completeWorkflow(args: {
   initialArchitectureState: ArchitectureState;
   root: string;
   lock: WorkflowLock;
+  adapter: AgentRuntimeAdapter;
+  executorFactory?: (adapter: AgentRuntimeAdapter) => AgentExecutorLike;
+  boundaryOptions: Parameters<typeof compareGitBoundary>[1];
 }): Promise<RunRecord | undefined> {
   const {
     storage,
@@ -691,18 +702,25 @@ async function completeWorkflow(args: {
     initialArchitectureState,
     root,
     lock,
+    adapter,
+    boundaryOptions,
   } = args;
-  let draftPersisted = false;
-  let plannerPostState: FactoryState | undefined;
-  let plannerStateRestoreAttempted = false;
-  let factoryChangedDuringPlanner = false;
   const currentArtifact = join(root, ".factory", "architecture", `${run.id}.html`);
   try {
     if (agent.name === "planner" && (await lstat(currentArtifact).catch(() => undefined)))
       throw Error("Planner architecture artifact must not pre-exist");
-    const runtime = lookupRegistry(agent.name).runtime;
+    // The definition is the immutable run snapshot.  Never re-read the live
+    // registry after launch: registry edits must not change a run in flight.
+    const definition = EffectiveRunDefinitionSchema.parse(
+      JSON.parse(await Bun.file(run.files.definition).text()),
+    );
+    // The persisted definition is the immutable policy authority for every
+    // completion, cancellation, and error path.
+    const boundaryPolicy = boundaryOptions.allowPreExistingUntracked ?? false;
+    const runtime = definition.runtime;
     const invocation = {
       repositoryRoot: root,
+      allowPreExistingUntracked: boundaryPolicy,
       runId: run.id,
       agent: {
         id: agent.name,
@@ -711,132 +729,139 @@ async function completeWorkflow(args: {
         model: runtime.model ?? agent.model,
         capabilities: runtime.capabilities,
         writeBoundary: agent.writeBoundary,
-        completionContract: lookupRegistry(agent.name).completionContract,
+        completionContract: definition.completionContract,
         adapterProfile: runtime.profile,
       },
       prompt: prompts.userPrompt,
       systemPrompt: prompts.systemPrompt,
       model: runtime.model ?? agent.model,
     };
-    let watching = true;
-    const watcher = (async () => {
-      while (watching) {
-        if (JSON.stringify(await factoryState(root)) !== JSON.stringify(initialFactoryState))
-          factoryChangedDuringPlanner = true;
-        await Bun.sleep(25);
-      }
-    })();
-    const outcome = await completeAgent(
-      { start: () => processRun } as any,
-      invocation,
-      async (event, activeProcess) => {
-        await storage.appendRaw(run.id, event);
-        if (event.normalized) storage.appendTrace(event.normalized);
-        let identity: string | undefined;
-        try {
-          identity = await processIdentity(activeProcess.pid, activeProcess.command);
-        } catch {
-          /* exited between event and ps */
-        }
-        storage.setAgentProcess(run.id, {
-          agentName: agent.name,
-          ...(activeProcess.executionKind === "service" ||
-          activeProcess.executionKind === "embedded"
-            ? { executionKind: activeProcess.executionKind }
-            : {
-                pid: activeProcess.pid,
-                ...(identity ? { identity } : {}),
-                executionKind: "subprocess" as const,
-              }),
-          // Storage keeps its legacy column for migration compatibility; the
-          // backend seam itself remains provider-neutral.
-          sessionId: event.executionId,
-        });
+    // The process was created during launch so ownership remains with this
+    // workflow.  Inject a narrow adapter facade rather than erasing its type.
+    const executor =
+      args.executorFactory?.({
+        id: adapter.id,
+        capabilities: adapter.capabilities,
+        supportsConcurrent: adapter.supportsConcurrent,
+        start: () => processRun,
+      }) ??
+      new AgentExecutor({
+        id: adapter.id,
+        capabilities: adapter.capabilities,
+        supportsConcurrent: adapter.supportsConcurrent,
+        start: () => processRun,
+      });
+    let outcome: WorkflowOutcome | undefined;
+    let result: any;
+    const runner = new WorkflowRunner({
+      // Legacy snapshots predate workflow stage definitions; retain their
+      // historical registry fallback, while every current run uses its stored
+      // immutable stage list.
+      stages: definition.workflow.stages ?? lookupRegistry(agent.name).workflow.stages,
+      actions:
+        agent.name === "planner"
+          ? plannerActions({
+              root,
+              runId: run.id,
+              get result() {
+                return result;
+              },
+              get outcome() {
+                return outcome ?? { events: [] };
+              },
+              initialArchitectureState,
+              architectureState,
+              validateArchitectureArtifact,
+              architectureMutated,
+              delegatedExplorer: (value: any) => delegatedExplorer(value),
+              completedVisualization: (value: any) => completedVisualization(value),
+              initialFactoryState,
+              factoryState: () => factoryState(root),
+              restoreFactoryState: (state, expected) => {
+                if (process.env.FACTORY_TEST_RESTORE_FAILURE)
+                  return Promise.reject(
+                    Error(
+                      `Injected restoration failure: ${process.env.FACTORY_TEST_RESTORE_FAILURE}`,
+                    ),
+                  );
+                return restoreFactoryState(root, state, expected);
+              },
+              onDraft: (id) => {
+                result = {
+                  ...result,
+                  summary: `${result.summary}\n\nDraft plan: ${id}`,
+                  notes: [...result.notes, `Created draft plan ${id}`],
+                };
+              },
+            })
+          : {},
+      transition: (stage) => {
+        const current = storage.getRun(run.id);
+        if (current?.status === "running")
+          storage.transitionStage(run.id, stage.id, stage.status, stage.failure);
       },
-    );
-    watching = false;
-    await watcher;
-    let result =
-      "result" in outcome
-        ? outcome.result
+      isCancelled: () => storage.getRun(run.id)?.cancellationRequested === true,
+      runAgent: async (stage) => {
+        outcome = await executor.execute(
+          { ...invocation, agent: { ...invocation.agent, id: stage.agent } },
+          async (event, activeProcess) => {
+            await storage.appendRaw(run.id, event);
+            if (event.normalized) storage.appendTrace(event.normalized);
+            let identity: string | undefined;
+            try {
+              identity = await processIdentity(activeProcess.pid, activeProcess.command);
+            } catch {
+              /* exited between event and ps */
+            }
+            storage.setAgentProcess(run.id, {
+              agentName: agent.name,
+              ...(activeProcess.executionKind === "service" ||
+              activeProcess.executionKind === "embedded"
+                ? { executionKind: activeProcess.executionKind }
+                : {
+                    pid: activeProcess.pid,
+                    ...(identity ? { identity } : {}),
+                    executionKind: "subprocess" as const,
+                  }),
+              // Storage keeps its legacy column for migration compatibility; the
+              // backend seam itself remains provider-neutral.
+              sessionId: event.executionId,
+            });
+          },
+        );
+        if (outcome && "result" in outcome) result = outcome.result;
+        if (outcome.kind !== "success")
+          throw Error(
+            outcome.kind === "invalid_output_exhausted"
+              ? outcome.reason
+              : outcome.kind === "agent_failure"
+                ? outcome.result.summary
+                : "Backend failed before producing an agent result",
+          );
+        if (result?.status !== "success") throw Error(result?.summary ?? "Agent stage failed");
+      },
+    });
+    await runner.run();
+    const finalOutcome: WorkflowOutcome = outcome ?? {
+      kind: "backend_failure",
+      attempts: 1,
+      exit: { code: null, signal: null, signalCode: null },
+      events: [],
+    };
+    result =
+      result ??
+      ("result" in finalOutcome
+        ? finalOutcome.result
         : {
             status: "failure" as const,
             summary:
-              outcome.kind === "invalid_output_exhausted"
-                ? `Invalid agent output: ${outcome.reason}`
+              finalOutcome.kind === "invalid_output_exhausted"
+                ? `Invalid agent output: ${finalOutcome.reason}`
                 : "Backend failed before producing an agent result",
             artifacts: [],
             notes: [],
-          };
-    if (agent.name === "planner") {
-      plannerPostState = await factoryState(root);
-      const barrier = process.env.FACTORY_TEST_PLANNER_POST_STATE_BARRIER;
-      if (barrier) {
-        await Bun.write(barrier, "captured\n");
-        while ((await Bun.file(`${barrier}.release`).exists()) === false) await Bun.sleep(10);
-      }
-    }
-    if (
-      agent.name === "planner" &&
-      JSON.stringify(plannerPostState) !== JSON.stringify(initialFactoryState)
-    ) {
-      if (factoryChangedDuringPlanner) throw new FactoryStateConcurrencyConflict();
-      plannerStateRestoreAttempted = true;
-      await restoreFactoryState(root, initialFactoryState, plannerPostState);
-      throw Error("Planner may not mutate Factory plan or mission state");
-    }
-    if (agent.name === "planner" && outcome.kind === "success") {
-      if (!delegatedExplorer(outcome)) throw Error("Planner must delegate to codebase-explorer");
-      if (!completedVisualization(outcome))
-        throw Error("Planner must complete the visualize-change skill");
-      if (!result.plan) throw Error("Planner must return a complete plan input");
-      const artifactPath = join(".factory", "architecture", `${run.id}.html`);
-      const declarations = result.artifacts.filter((artifact) => artifact.kind === "architecture");
-      if (
-        result.artifacts.length !== 1 ||
-        declarations.length !== 1 ||
-        declarations[0].path !== artifactPath
-      )
-        throw Error("Planner must declare exactly one matching architecture artifact");
-      const externalArtifacts = result.plan.externalArtifacts ?? [];
-      if (
-        externalArtifacts.some((artifact) => artifact.path === artifactPath) ||
-        new Set(externalArtifacts.map((artifact) => artifact.path)).size !==
-          externalArtifacts.length
-      )
-        throw Error(
-          "Planner must not duplicate the architecture artifact in plan.externalArtifacts",
-        );
-      const afterArchitectureState = await architectureState(root);
-      if (architectureMutated(initialArchitectureState, afterArchitectureState, `${run.id}.html`))
-        throw Error("Planner may only create the current run architecture artifact");
-      await validateArchitectureArtifact(root, artifactPath);
-      const planInput = {
-        ...result.plan,
-        externalArtifacts: [
-          ...(result.plan.externalArtifacts ?? []),
-          { path: artifactPath, label: declarations[0].description },
-        ],
-      };
-      const draftBarrier = process.env.FACTORY_TEST_PLANNER_BEFORE_DRAFT_BARRIER;
-      if (draftBarrier) {
-        await Bun.write(draftBarrier, "ready\n");
-        while ((await Bun.file(`${draftBarrier}.release`).exists()) === false) await Bun.sleep(10);
-      }
-      if (JSON.stringify(await factoryState(root)) !== JSON.stringify(initialFactoryState))
-        throw new FactoryStateConcurrencyConflict();
-      let plan;
-      plan = await createDraftPlan(planInput, join(root, ".factory", "plans.jsonl"), root);
-      draftPersisted = true;
-      if ((await factoryState(root)).missions.content !== initialFactoryState.missions.content)
-        throw Error("Planner draft creation changed mission state");
-      result = {
-        ...result,
-        summary: `${result.summary}\n\nDraft plan: ${plan.id}`,
-        notes: [...result.notes, `Created draft plan ${plan.id}`],
-      };
-    }
-    if ("result" in outcome) await storage.writeResult(run.id, result);
+          });
+    if ("result" in finalOutcome) await storage.writeResult(run.id, result);
     storage.appendTrace({
       runId: run.id,
       at: new Date().toISOString(),
@@ -845,26 +870,13 @@ async function completeWorkflow(args: {
       result,
     });
 
-    const comparison = await compareGitBoundary(boundary, {
-      repositoryRoot: root,
-    });
+    const comparison = await compareGitBoundary(boundary, boundaryOptions);
     let boundaryFailure: string | undefined;
     let restorationFailure: string | undefined;
     if (!comparison.equal) {
       boundaryFailure = `Git boundary violation: ${JSON.stringify(comparison)}`;
       try {
-        await restoreGitBoundary(boundary, {
-          repositoryRoot: root,
-          runtimeDirectory: join(root, ".factory"),
-          ...(process.env.FACTORY_TEST_RESTORE_FAILURE
-            ? {
-                restoreFailure: (step) => {
-                  if (step === process.env.FACTORY_TEST_RESTORE_FAILURE)
-                    throw Error(`Injected restoration failure: ${step}`);
-                },
-              }
-            : {}),
-        });
+        await restoreGitBoundary(boundary, boundaryOptions, boundaryOptions);
       } catch (error) {
         restorationFailure = errorMessage(error);
       }
@@ -873,19 +885,31 @@ async function completeWorkflow(args: {
     if (current?.status !== "running") {
       // stopWorkflow can mark cancellation before this completion callback observes
       // the process exit. The callback still owns the snapshot and must restore it.
-      await enforceGitBoundary(boundary, root);
+      await enforceGitBoundary(boundary, boundaryOptions);
       return current;
     }
-    const failure = workflowFailure(outcome, boundaryFailure, restorationFailure);
+    const failedStage = runner.stages.find((stage) => stage.status === "failed");
+    const failure =
+      workflowFailure(finalOutcome, boundaryFailure, restorationFailure) ??
+      (failedStage
+        ? {
+            code: "WORKFLOW_FAILURE" as const,
+            message: failedStage.failure ?? "Workflow stage failed",
+          }
+        : undefined);
     return storage.finishRun(
       run.id,
-      !failure && outcome.kind === "success" ? "succeeded" : "failed",
+      !failure &&
+        finalOutcome.kind === "success" &&
+        !runner.stages.some((stage) => stage.status === "cancelled")
+        ? "succeeded"
+        : "failed",
       failure,
     );
   } catch (error) {
     let failure = errorMessage(error);
     try {
-      const boundaryResult = await enforceGitBoundary(boundary, root);
+      const boundaryResult = await enforceGitBoundary(boundary, boundaryOptions);
       if (boundaryResult.failure) {
         failure = `${failure}; ${boundaryResult.failure}`;
         if (boundaryResult.restorationFailure)
@@ -894,17 +918,7 @@ async function completeWorkflow(args: {
     } catch (boundaryError) {
       failure += `; Git boundary check failed: ${errorMessage(boundaryError)}`;
     }
-    if (agent.name === "planner") {
-      try {
-        if (plannerPostState && !plannerStateRestoreAttempted) {
-          plannerStateRestoreAttempted = true;
-          await restoreFactoryState(root, initialFactoryState, plannerPostState);
-        }
-      } catch (restoreError) {
-        failure = `${failure}; Factory state restoration failed: ${errorMessage(restoreError)}`;
-      }
-      await rm(currentArtifact, { force: true }).catch(() => undefined);
-    } else if (!draftPersisted) await rm(currentArtifact, { force: true }).catch(() => undefined);
+    await rm(currentArtifact, { force: true }).catch(() => undefined);
     return terminalFailure(storage, run, Error(failure));
   } finally {
     activeProcesses.delete(`${root}:${run.id}`);
