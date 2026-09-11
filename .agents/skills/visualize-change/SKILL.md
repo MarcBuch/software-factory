@@ -5,7 +5,7 @@ description: Author a precise standalone HTML technical architecture brief for a
 
 # Visualize Change
 
-After repository exploration when available, directly author one standalone HTML document. Exploration and this skill are recommended techniques, not mandatory Factory acceptance gates. In Factory planner runs write only the exact run-context path `.factory/architecture/<run-id>.html`; in normal standalone use write to the caller-specified repository-relative `.html` path. Never return structured architecture data as a substitute for the exact validated artifact.
+After repository exploration when available, directly author one standalone HTML document. In Factory planner runs the exact artifact is required for success and must be written only at the run-context path `.factory/architecture/<run-id>.html`; exploration and invoking this skill are recommended techniques rather than acceptance gates. In normal standalone use write to the caller-specified repository-relative `.html` path. Never return structured architecture data as a substitute for the exact validated artifact.
 
 ## Evidence rule
 

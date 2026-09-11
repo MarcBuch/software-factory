@@ -309,9 +309,14 @@ test("planner roster renders a delegated, workflow-persisted draft plan prompt",
   const rendered = renderAgentPrompts("planner", "Plan notifications");
   expect(rendered.systemPrompt).toContain("codebase-explorer");
   expect(rendered.systemPrompt).toContain("visualize-change");
-  expect(rendered.systemPrompt).toContain("recommended guidance");
+  expect(rendered.systemPrompt).toContain("recommended techniques");
+  expect(rendered.systemPrompt).not.toContain("not success requirements");
+  expect(rendered.systemPrompt).toContain("both are required");
+  expect(rendered.systemPrompt).toContain(
+    "a missing, misplaced, or invalid artifact fails the run",
+  );
   expect(rendered.systemPrompt).toContain("result.plan");
-  expect(rendered.systemPrompt).toContain("write the exact run artifact");
+  expect(rendered.systemPrompt).toContain("Write the exact run artifact first");
   expect(rendered.systemPrompt).toContain("appends its pln_ ID");
   expect(rendered.systemPrompt).toContain('"plan":{"missionTitle":string');
   expect(rendered.systemPrompt).toContain(

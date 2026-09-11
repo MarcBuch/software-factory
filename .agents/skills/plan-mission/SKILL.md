@@ -31,7 +31,7 @@ Verification mode: fast | standard | exhaustive
 
 After approval, write plan JSON containing `missionTitle`, `intent`, `changePlan`, `risks` (objects with `description` and `mitigation`), `alternatives` (objects with `name` and `rejectedBecause`), `acceptanceCriteria`, `verificationStrategy`, `verificationMode`, and optional `externalArtifacts`. Input files may be outside the Git project, but artifact paths remain repository-relative. Approval is the gate: do not generate architecture artifacts, create a plan, or materialize a mission before explicit approval.
 
-Use `visualize-change` as the recommended technique for architecture visualization. It owns the exact document structure, evidence rules, visual language, and direct HTML authoring. In the Factory planner workflow, if used, it writes `.factory/architecture/<run-id>.html`; return `plan` plus one matching declaration in `artifacts`. Factory acceptance is based on the valid structured result and the exact validated architecture artifact, not on proving that this skill was invoked. Factory only validates, attaches, and persists it.
+In the Factory planner workflow, a successful run requires the complete `plan` plus exactly one matching declaration in `artifacts` for the architecture artifact at `.factory/architecture/<run-id>.html`. `visualize-change` is the recommended technique for authoring it and owns the document structure, evidence rules, visual language, and direct HTML authoring. Factory validates the structured result and the exact artifact bytes, not whether the skill was invoked, then attaches and persists the artifact.
 
 Run the following ordered workflow, using each command's `--json` result and parsing its `.id` value (an agent may parse the tool output directly; `jq` is optional):
 
@@ -45,7 +45,7 @@ Plan creation and approval write only `.factory/plans.jsonl`. Materialization re
 
 - Always classify risk and state verification mode.
 - Always present the plan and STOP for approval.
-- The Factory `planner` workflow may use the recommended exploration and `visualize-change` techniques; return the complete plan plus its artifact declaration. Factory validates the structured result and existing exact artifact bytes, then persists exactly one non-executable draft. Neither delegation nor skill invocation is itself an acceptance gate.
+- The Factory `planner` workflow requires the complete plan and exactly one valid architecture artifact declaration; exploration and `visualize-change` are recommended techniques for producing those outputs, not acceptance gates. Factory validates the structured result and existing exact artifact bytes, then persists exactly one non-executable draft.
 - Never call `mission_init` from this skill or begin implementation before approval.
 - Keep verification proportional; explain any dedicated verification task.
 - Do not create missions, milestones, or tasks directly in this workflow.

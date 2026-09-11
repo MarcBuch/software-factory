@@ -106,12 +106,14 @@ export function plannerActions(context: PlannerActionContext) {
     const result = context.result;
     const path = join(".factory", "architecture", `${context.runId}.html`);
     const declarations = result.artifacts.filter((item) => item.kind === "architecture");
-    if (
-      result.artifacts.length !== 1 ||
-      declarations.length !== 1 ||
-      declarations[0]!.path !== path
-    )
-      throw Error("Planner must declare exactly one matching architecture artifact");
+    if (result.artifacts.length !== 1 || declarations.length !== 1)
+      throw Error(
+        `Planner must declare exactly one architecture artifact; received ${result.artifacts.length} artifact(s) of which ${declarations.length} had kind "architecture"`,
+      );
+    if (declarations[0]!.path !== path)
+      throw Error(
+        `Planner architecture artifact path must be ${path}; received ${declarations[0]!.path}`,
+      );
     normalizePlannerExternalArtifacts(
       result.plan?.externalArtifacts ?? [],
       path,

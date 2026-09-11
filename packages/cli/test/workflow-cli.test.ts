@@ -330,6 +330,38 @@ test("planner succeeds without a visualize-change event", async () => {
   expect(await Bun.file(join(p.dir, ".factory", "plans.jsonl")).exists()).toBe(true);
 });
 
+test("planner rejects a result without an architecture artifact declaration", async () => {
+  const p = await repo(
+    await fakeScript(
+      `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[],notes:[],plan:{missionTitle:"Undeclared artifact",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    ),
+  );
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
+  expect(result.code).toBe(1);
+  expect(result.stderr || result.stdout).toContain(
+    "Planner must declare exactly one architecture artifact",
+  );
+});
+
+test("planner rejects an architecture artifact declared at the wrong path", async () => {
+  const p = await repo(
+    await fakeScript(
+      `const fs=await import("node:fs/promises"); const run=(await fs.readdir(".factory/runs")).sort().at(-1); await fs.mkdir(".factory/architecture",{recursive:true}); await fs.writeFile(".factory/architecture/"+run+".html","<!doctype html><html><head><title>Architecture</title></head><body><h2>Intent</h2><p>Details</p></body></html>"); const content=["---FACTORY_RESULT_JSON---",JSON.stringify({status:"success",summary:"plan",artifacts:[{path:".factory/architecture/wrong.html",kind:"architecture",description:"Architecture"}],notes:[],plan:{missionTitle:"Wrong path",verificationMode:"fast",intent:"Intent",changePlan:"Approach",risks:[],alternatives:[],acceptanceCriteria:["Accepted"],verificationStrategy:"Check"}}),"---END_FACTORY_RESULT_JSON---"].join(String.fromCharCode(10)); process.stdout.write(JSON.stringify({role:"assistant",content})+String.fromCharCode(10));`,
+    ),
+  );
+  const result = await run(
+    p.dir,
+    ["workflow", "run", "--agent", "planner", "plan it", "--json"],
+    p.env,
+  );
+  expect(result.code).toBe(1);
+  expect(result.stderr || result.stdout).toContain("Planner architecture artifact path must be");
+});
+
 test("planner cleans up its generated artifact when draft creation fails", async () => {
   const architecture = {
     lede: "Brief",
