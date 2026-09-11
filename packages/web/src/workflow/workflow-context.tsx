@@ -1,4 +1,4 @@
-import type { Run, TraceEventApi, TraceSummary } from "@software-factory/contracts";
+import type { AgentTimeline, Run, TraceEventApi, TraceSummary } from "@software-factory/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { createContext, useContext, useState, type ReactNode } from "react";
 
@@ -7,7 +7,7 @@ import { useDelete, useLaunch, useSessions, useSse, useTrace } from "@/data/quer
 export type { LaunchAgent } from "@/data/queries";
 
 export type Event = TraceEventApi;
-export type { Run, TraceSummary };
+export type { AgentTimeline, Run, TraceSummary };
 type State = {
   runs: Run[];
   cursor?: number;
@@ -16,6 +16,7 @@ type State = {
   traceCursor?: number;
   hasMore: boolean;
   traceSummary?: TraceSummary;
+  agents?: AgentTimeline;
   error: string;
   launching: boolean;
   deleting: boolean;
@@ -56,6 +57,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         traceCursor: latest?.nextCursor,
         hasMore: !!traceQuery.hasNextPage,
         traceSummary: latest?.summary,
+        agents: latest?.agents,
         error: (sessions.error ?? traceQuery.error)?.message ?? "",
         launching: launch.isPending,
         deleting: remove.isPending,

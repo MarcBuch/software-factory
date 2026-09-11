@@ -96,13 +96,19 @@ class MockEventSource {
   static instances: MockEventSource[] = [];
   readonly url: string;
   closed = false;
+  private readonly listeners = new Map<string, () => void>();
 
   constructor(url: string) {
     this.url = url;
     MockEventSource.instances.push(this);
   }
 
-  addEventListener() {}
+  addEventListener(event: string, listener: () => void) {
+    this.listeners.set(event, listener);
+  }
+  emit(event: string) {
+    this.listeners.get(event)?.();
+  }
   close() {
     this.closed = true;
   }
@@ -170,7 +176,14 @@ function setup(initialEntry = "/runs") {
         );
       if (path.includes("/trace"))
         return Promise.resolve(
-          jsonResponse({ runId: "run-1", events: [], hasMore: false, summary, publicRun: run }),
+          jsonResponse({
+            runId: "run-1",
+            events: [],
+            hasMore: false,
+            summary,
+            publicRun: run,
+            agents: [{ name: "scout", startedAt: run.startedAt, finishedAt: run.finishedAt }],
+          }),
         );
       if (path.endsWith("/api/plans")) return Promise.resolve(jsonResponse(mockPlans));
       return Promise.resolve(jsonResponse({ runs: [run] }));
@@ -212,10 +225,40 @@ describe("router shell", () => {
     fireEvent.click(screen.getByRole("button", { name: /inspect the repository/i }));
     await waitFor(() => expect(router.history.location.pathname).toBe("/runs/run-1"));
     expect(await screen.findByText("run-1")).toBeInTheDocument();
+    expect(screen.getByText("1 agents")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /scout 0 events/i })).toBeInTheDocument();
     router.history.back();
     await waitFor(() => expect(router.history.location.pathname).toBe("/runs"));
     rendered.unmount();
     expect(MockEventSource.instances[0].closed).toBe(true);
+  });
+
+  test("opens mobile navigation and closes it after a route selection", async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: vi.fn<() => void>(),
+      removeEventListener: vi.fn<() => void>(),
+    }));
+    try {
+      const { router, queryClient } = setup("/runs");
+      render(
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>,
+      );
+
+      await screen.findByRole("heading", { name: "Session traces" });
+      fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
+      const navigation = await screen.findByRole("dialog");
+      expect(within(navigation).getByRole("link", { name: /workspace/i })).toBeInTheDocument();
+      fireEvent.click(within(navigation).getByRole("link", { name: /workspace/i }));
+      await waitFor(() => expect(router.history.location.pathname).toBe("/workspace"));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
+    }
   });
 
   test("routes launch and delete actions", async () => {
@@ -263,6 +306,237 @@ describe("router shell", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByRole("heading", { name: "Run unavailable" })).toBeInTheDocument();
+  });
+
+  test("refreshes sessions and plans after an SSE update", async () => {
+    const { router, fetchMock, queryClient } = setup("/runs");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "Session traces" });
+    const callsBeforeUpdate = fetchMock.mock.calls.length;
+    MockEventSource.instances[0]!.emit("update");
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeUpdate));
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions?limit=30", expect.anything());
+  });
+
+  test("renders a trace with no agents through the workflow context", async () => {
+    const { router, fetchMock, queryClient } = setup("/runs/run-1");
+    const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) =>
+      String(input).includes("/trace")
+        ? Promise.resolve(
+            jsonResponse({
+              runId: "run-1",
+              events: [],
+              hasMore: false,
+              summary,
+              publicRun: run,
+              agents: [],
+            }),
+          )
+        : defaultFetch(input, init),
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Agent timeline" })).toBeInTheDocument();
+    expect(screen.getByText("0 agents")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /events$/i })).not.toBeInTheDocument();
+  });
+
+  test("renders every lifecycle agent and filters events when a lane is selected", async () => {
+    const { router, fetchMock, queryClient } = setup("/runs/run-1");
+    const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) =>
+      String(input).includes("/trace")
+        ? Promise.resolve(
+            jsonResponse({
+              runId: "run-1",
+              events: [
+                {
+                  id: 1,
+                  at: "2026-01-01T00:00:00.000Z",
+                  type: "model_step",
+                  agentName: "active",
+                  message: "active event",
+                },
+                {
+                  id: 2,
+                  at: "2026-01-01T00:00:01.000Z",
+                  type: "model_step",
+                  agentName: "active",
+                  message: "second active event",
+                },
+              ],
+              hasMore: false,
+              summary,
+              publicRun: run,
+              agents: [
+                { name: "active", startedAt: run.startedAt, finishedAt: run.finishedAt },
+                { name: "unobserved", startedAt: run.startedAt, finishedAt: null },
+              ],
+            }),
+          )
+        : defaultFetch(input, init),
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+
+    const unobservedLane = await screen.findByRole("button", {
+      name: /unobserved.*0 events.*running/i,
+    });
+    expect(screen.getByRole("button", { name: /active.*2 events.*finished/i })).toBeInTheDocument();
+    expect(screen.getByText("active event")).toBeInTheDocument();
+    expect(screen.getByText("second active event")).toBeInTheDocument();
+    fireEvent.click(unobservedLane);
+    expect(await screen.findByRole("heading", { name: "unobserved events" })).toBeInTheDocument();
+    expect(screen.queryByText("active event")).not.toBeInTheDocument();
+    expect(screen.queryByText("second active event")).not.toBeInTheDocument();
+    expect(screen.getByText("No events recorded for this agent.")).toBeInTheDocument();
+  });
+
+  test("positions completed and running lanes on their shared lifecycle axis", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-01-01T00:00:20.000Z"));
+    const { router, fetchMock, queryClient } = setup("/runs/run-1");
+    const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) =>
+      String(input).includes("/trace")
+        ? Promise.resolve(
+            jsonResponse({
+              runId: "run-1",
+              events: [],
+              hasMore: false,
+              summary,
+              publicRun: run,
+              agents: [
+                {
+                  name: "completed",
+                  startedAt: "2026-01-01T00:00:00.000Z",
+                  finishedAt: "2026-01-01T00:00:10.000Z",
+                },
+                {
+                  name: "overlap",
+                  startedAt: "2026-01-01T00:00:02.000Z",
+                  finishedAt: "2026-01-01T00:00:12.000Z",
+                },
+                {
+                  name: "staggered",
+                  startedAt: "2026-01-01T00:00:05.000Z",
+                  finishedAt: "2026-01-01T00:00:15.000Z",
+                },
+                {
+                  name: "running",
+                  startedAt: "2026-01-01T00:00:10.000Z",
+                  finishedAt: null,
+                },
+              ],
+            }),
+          )
+        : defaultFetch(input, init),
+    );
+
+    try {
+      const rendered = render(
+        <QueryClientProvider client={queryClient}>
+          <RouterProvider router={router} />
+        </QueryClientProvider>,
+      );
+      await screen.findByRole("heading", { name: "Agent timeline" });
+      const bar = (name: string) =>
+        rendered.container.querySelector(`[data-start-percent][data-agent="${name}"]`)!;
+      const bars = rendered.container.querySelectorAll(".agent .bar i");
+      expect(bars).toHaveLength(4);
+      expect(bars[0]).toHaveAttribute("data-start-percent", "0.00");
+      expect(bars[0]).toHaveAttribute("data-width-percent", "50.00");
+      expect(bars[1]).toHaveAttribute("data-start-percent", "10.00");
+      expect(bars[1]).toHaveAttribute("data-width-percent", "50.00");
+      expect(bars[2]).toHaveAttribute("data-start-percent", "25.00");
+      expect(bars[2]).toHaveAttribute("data-width-percent", "50.00");
+      expect(bars[3]).toHaveAttribute("data-start-percent", "50.00");
+      expect(bars[3]).toHaveAttribute("data-width-percent", "50.00");
+      expect(bars[0]).toHaveClass("bar-completed");
+      expect(bars[3]).toHaveClass("bar-active");
+      expect(screen.getByRole("button", { name: /running.*running/i })).toBeInTheDocument();
+      expect(screen.getByText("0 events · running")).toBeInTheDocument();
+      expect(bar("running")).toHaveStyle({ left: "50%", width: "50%" });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  test("keeps a zero-duration completed lane visible at the right boundary", async () => {
+    const { router, fetchMock, queryClient } = setup("/runs/run-1");
+    const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) =>
+      String(input).includes("/trace")
+        ? Promise.resolve(
+            jsonResponse({
+              runId: "run-1",
+              events: [],
+              hasMore: false,
+              summary,
+              publicRun: run,
+              agents: [
+                {
+                  name: "anchor",
+                  startedAt: "2026-01-01T00:00:00.000Z",
+                  finishedAt: "2026-01-01T00:00:10.000Z",
+                },
+                {
+                  name: "instant",
+                  startedAt: "2026-01-01T00:00:10.000Z",
+                  finishedAt: "2026-01-01T00:00:10.000Z",
+                },
+              ],
+            }),
+          )
+        : defaultFetch(input, init),
+    );
+
+    const rendered = render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "Agent timeline" });
+    const bar = rendered.container.querySelector('[data-agent="instant"]')!;
+    expect(bar).toHaveAttribute("data-start-percent", "98.00");
+    expect(bar).toHaveAttribute("data-width-percent", "2.00");
+    expect(bar).toHaveStyle({ left: "98%", width: "2%" });
+  });
+
+  test("refreshes the selected trace and sessions after an SSE update", async () => {
+    const { router, fetchMock, queryClient } = setup("/runs/run-1");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "Agent timeline" });
+    const traceCallsBeforeUpdate = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/trace"),
+    ).length;
+    const sessionCallsBeforeUpdate = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/api/sessions?"),
+    ).length;
+    MockEventSource.instances[0]!.emit("update");
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).includes("/trace")).length,
+      ).toBeGreaterThan(traceCallsBeforeUpdate);
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/sessions?")).length,
+      ).toBeGreaterThan(sessionCallsBeforeUpdate);
+    });
   });
 
   test("navigates to a dedicated plan detail and preserves browser back", async () => {

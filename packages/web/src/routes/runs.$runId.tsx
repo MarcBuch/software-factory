@@ -11,7 +11,6 @@ export const Route = createFileRoute("/runs/$runId")({
     const { setSelected } = w;
     const navigate = useNavigate();
     useEffect(() => setSelected(runId), [runId, setSelected]);
-    const agents = Array.from(new Set(w.trace.map((e) => e.agentName).filter(Boolean) as string[]));
     if (w.selected !== runId) return <p className="muted">Loading session…</p>;
     if (w.traceRunId !== runId) return <p className="muted">Loading session…</p>;
     if (w.unavailable) return <Unavailable onBack={() => void navigate({ to: "/runs" })} />;
@@ -21,7 +20,7 @@ export const Route = createFileRoute("/runs/$runId")({
         run={w.run}
         trace={w.trace}
         traceSummary={w.traceSummary}
-        agents={agents}
+        agents={w.agents ?? []}
         onBack={() => void navigate({ to: "/runs" })}
         onMore={() => w.loadTrace(runId, w.traceCursor)}
         hasMore={w.hasMore}

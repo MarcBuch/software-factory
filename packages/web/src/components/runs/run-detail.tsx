@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import type { Event, Run, TraceSummary } from "@/workflow/workflow-context";
+import type { AgentTimeline, Event, Run, TraceSummary } from "@/workflow/workflow-context";
 
 const date = (v?: string) =>
   v
@@ -30,6 +30,44 @@ const date = (v?: string) =>
 const duration = (a?: string, b?: string) =>
   a ? `${Math.max(0, ((b ? Date.parse(b) : Date.now()) - Date.parse(a)) / 1000).toFixed(1)}s` : "—";
 const json = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
+
+const MIN_BAR_WIDTH_PERCENT = 2;
+type AgentBarGeometry = { left: number; width: number };
+
+function agentBarGeometry(
+  lifecycle: AgentTimeline[number],
+  domain: { start: number; end: number },
+  now: number,
+): AgentBarGeometry {
+  const started = Date.parse(lifecycle.startedAt);
+  const finished = lifecycle.finishedAt ? Date.parse(lifecycle.finishedAt) : now;
+  const start = Number.isFinite(started) ? started : domain.start;
+  const end = Number.isFinite(finished) ? Math.max(start, finished) : start;
+  const span = Math.max(1, domain.end - domain.start);
+  const rawLeft = Math.min(100, Math.max(0, ((start - domain.start) / span) * 100));
+  const actualWidth = Math.max(0, ((end - start) / span) * 100);
+  const width = Math.min(100, Math.max(MIN_BAR_WIDTH_PERCENT, actualWidth));
+  return {
+    // A point at the end of the domain still needs a visible marker. Shift
+    // that marker left rather than letting the width cap collapse to zero.
+    left: Math.min(100 - width, rawLeft),
+    width,
+  };
+}
+
+function agentBarDomain(agents: AgentTimeline, now: number) {
+  const starts = agents.map(({ startedAt }) => Date.parse(startedAt)).filter(Number.isFinite);
+  const ends = agents
+    .map(({ startedAt, finishedAt }) => {
+      const start = Date.parse(startedAt);
+      const end = finishedAt ? Date.parse(finishedAt) : now;
+      return Number.isFinite(start) && Number.isFinite(end) ? Math.max(start, end) : undefined;
+    })
+    .filter((value): value is number => value !== undefined);
+  const start = starts.length > 0 ? Math.min(...starts) : 0;
+  const end = ends.length > 0 ? Math.max(...ends) : start + 1;
+  return { start, end: end > start ? end : start + 1 };
+}
 export function Unavailable({ onBack }: { onBack: () => void }) {
   return (
     <section className="hero">
@@ -58,7 +96,7 @@ export function Detail({
   run: Run;
   trace: Event[];
   traceSummary?: TraceSummary;
-  agents: string[];
+  agents: AgentTimeline;
   onBack: () => void;
   onMore: () => void;
   hasMore: boolean;
@@ -66,7 +104,12 @@ export function Detail({
   onDelete: () => void;
 }) {
   const [agent, setAgent] = useState<string>();
-  useEffect(() => setAgent((a) => (a && agents.includes(a) ? a : agents[0])), [run.id, agents]);
+  const now = Date.now();
+  const barDomain = agentBarDomain(agents, now);
+  useEffect(
+    () => setAgent((a) => (a && agents.some(({ name }) => name === a) ? a : agents[0]?.name)),
+    [run.id, agents],
+  );
   const selected = trace.filter((e) => !agent || e.agentName === agent);
   const pageUsage = trace.reduce(
     (a, e) => ({
@@ -144,21 +187,50 @@ export function Detail({
             <span>{agents.length} agents</span>
           </div>
           <Separator />
-          <div className="gantt">
-            {agents.map((a, i) => (
-              <Button
-                variant={a === agent ? "secondary" : "ghost"}
-                className={`agent ${a === agent ? "chosen" : ""}`}
-                key={a}
-                onClick={() => setAgent(a)}
-              >
-                <span>{a}</span>
-                <div className="bar">
-                  <i style={{ left: `${i * 7}%`, width: `${Math.max(18, 75 - i * 8)}%` }} />
-                </div>
-                <small>{trace.filter((e) => e.agentName === a).length} events</small>
-              </Button>
-            ))}
+          <div
+            className="gantt"
+            tabIndex={0}
+            role="region"
+            aria-label="Agent timeline"
+            aria-describedby="gantt-instructions"
+          >
+            <p id="gantt-instructions" className="gantt-instructions">
+              Use horizontal scrolling to view the complete agent timeline.
+            </p>
+            {agents.length === 0 && (
+              <p className="muted agent-empty">No agents were recorded for this session.</p>
+            )}
+            {agents.map((lifecycle) => {
+              const { name: a, startedAt, finishedAt } = lifecycle;
+              const eventCount = trace.filter((e) => e.agentName === a).length;
+              const bar = agentBarGeometry(lifecycle, barDomain, now);
+              return (
+                <Button
+                  variant={a === agent ? "secondary" : "ghost"}
+                  className={`agent ${a === agent ? "chosen" : ""}`}
+                  key={a}
+                  onClick={() => setAgent(a)}
+                >
+                  <span>{a}</span>
+                  <div className="bar" aria-hidden="true">
+                    <i
+                      className={finishedAt ? "bar-completed" : "bar-active"}
+                      data-agent={a}
+                      data-start-percent={bar.left.toFixed(2)}
+                      data-width-percent={bar.width.toFixed(2)}
+                      style={{ left: `${bar.left}%`, width: `${bar.width}%` }}
+                    />
+                  </div>
+                  <small className="agent-status">
+                    {eventCount} events · {finishedAt ? "finished" : "running"}
+                  </small>
+                  <small className="agent-dates">
+                    {date(startedAt)}
+                    {finishedAt ? ` – ${date(finishedAt)}` : ""}
+                  </small>
+                </Button>
+              );
+            })}
           </div>
         </CardContent>
       </Card>
@@ -202,6 +274,13 @@ export function Detail({
               </div>
             </article>
           ))}
+          {selected.length === 0 && (
+            <p className="muted event-empty">
+              {agent
+                ? "No events recorded for this agent."
+                : "No events recorded for this session."}
+            </p>
+          )}
           {hasMore && (
             <Button className="more" variant="outline" onClick={onMore}>
               Load more events

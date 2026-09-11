@@ -10,6 +10,7 @@ import {
   type Run,
   type TraceEventApi,
   type TraceSummary,
+  type AgentTimeline,
 } from "@software-factory/contracts";
 import {
   type InfiniteData,
@@ -31,6 +32,7 @@ export type TracePage = {
   hasMore: boolean;
   summary: TraceSummary;
   publicRun?: Run;
+  agents?: AgentTimeline;
 };
 export type LaunchAgent = string;
 export const workflowsQuery = () =>
@@ -142,7 +144,14 @@ export function useTrace(id: string) {
             events.push(event);
           return events;
         }, []),
-      latest: data.pages[data.pages.length - 1],
+      latest: data.pages.reduce(
+        (latest, page) => ({
+          ...page,
+          publicRun: page.publicRun ?? latest.publicRun,
+          agents: page.agents ?? latest.agents,
+        }),
+        data.pages[0],
+      ),
     }),
   });
   useEffect(() => {
