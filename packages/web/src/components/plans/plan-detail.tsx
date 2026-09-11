@@ -94,7 +94,21 @@ export function PlanDetail({
                 <List title="External plan artifacts">
                   {plan.externalArtifacts.map((artifact) => (
                     <div key={artifact.path} className="rounded-lg border p-3 text-sm">
-                      <p className="font-medium">{artifact.label ?? artifact.path}</p>
+                      <p className="font-medium">
+                        {artifact.path.endsWith(".html") ? (
+                          <a
+                            href={`/api/plans/${encodeURIComponent(plan.id)}/artifact?path=${encodeURIComponent(artifact.path)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label={`View architecture: ${artifact.label ?? artifact.path}`}
+                            className="text-primary underline-offset-4 hover:underline"
+                          >
+                            {artifact.label ?? artifact.path}
+                          </a>
+                        ) : (
+                          (artifact.label ?? artifact.path)
+                        )}
+                      </p>
                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                         {artifact.path}
                       </p>
