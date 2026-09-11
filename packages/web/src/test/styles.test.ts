@@ -18,7 +18,7 @@ describe("timeline motion accessibility", () => {
 
   test("uses a wide timeline grid with readable labels and status", () => {
     expect(styles).toMatch(
-      /\.agent\s*\{[\s\S]*?grid-template-columns:\s*minmax\(110px,\s*20%\)\s+minmax\(320px,\s*1fr\)\s+minmax\(140px,\s*auto\);/,
+      /\.agent\s*\{[\s\S]*?grid-template-columns:\s*minmax\(110px,\s*240px\)\s+minmax\(320px,\s*1fr\)\s+minmax\(140px,\s*auto\);/,
     );
     expect(styles).toMatch(/\.agent-status\s*\{[\s\S]*?white-space:\s*nowrap;/);
     expect(styles).toMatch(/\.agent-dates\s*\{[\s\S]*?grid-column:\s*1\s*\/\s*-1;/);

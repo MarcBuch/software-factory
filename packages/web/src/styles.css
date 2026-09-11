@@ -336,7 +336,7 @@ header {
 }
 .agent {
   display: grid;
-  grid-template-columns: minmax(110px, 20%) minmax(320px, 1fr) minmax(140px, auto);
+  grid-template-columns: minmax(110px, 240px) minmax(320px, 1fr) minmax(140px, auto);
   align-items: center;
   gap: 14px;
   width: 100%;
