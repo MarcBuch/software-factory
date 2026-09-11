@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { startWorkflow, stopWorkflow } from "../src/workflow-service";
 import { openWorkflowStorage } from "../src/workflow-storage";
 
 const root = join(import.meta.dir, "..");
@@ -550,6 +551,54 @@ test("live expected backend can be stopped by a second CLI", async () => {
   expect(final.run.failure).toBeUndefined();
   expect(() => process.kill(state.run.childPid, 0)).toThrow();
 }, 30000);
+
+test("live unverified local handle is rejected without cancellation", async () => {
+  let release!: (exit: { code: number; signal: null; signalCode: null }) => void;
+  let canceled = false;
+  const exit = new Promise<{ code: number; signal: null; signalCode: null }>((resolve) => {
+    release = resolve;
+  });
+  const process = {
+    executionKind: "subprocess" as const,
+    pid: -1,
+    command: ["unverifiable-backend"],
+    exit,
+    kill() {},
+    cancel() {
+      canceled = true;
+      release({ code: 143, signal: null, signalCode: null });
+    },
+    continue() {
+      return this;
+    },
+    async *[Symbol.asyncIterator]() {
+      await exit;
+    },
+  };
+  const p = await repo(await fakeScript(""));
+  const launch = await startWorkflow(
+    p.dir,
+    { agentName: "scout", request: "wait" },
+    {
+      adapter: {
+        id: "test",
+        capabilities: ["repository.read"],
+        start: () => process,
+      },
+    },
+  );
+
+  await expect(stopWorkflow(p.dir, launch.run.id)).rejects.toThrow(
+    "Cannot safely stop unverifiable process",
+  );
+  expect(canceled).toBe(false);
+  const storage = await openWorkflowStorage(p.dir);
+  expect(storage.getRun(launch.run.id)?.status).toBe("running");
+  storage.close();
+
+  process.cancel();
+  await launch.completion;
+});
 
 test("stale persisted PID is rejected without killing unrelated sleep", async () => {
   const fake = await fakeScript("await Bun.sleep(10000);");

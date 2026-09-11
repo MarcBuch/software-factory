@@ -217,6 +217,21 @@ export const StageRecordSchema = z
     )
       context.addIssue({ code: "custom", message: "finishedAt must be >= startedAt" });
   });
+
+/** A durable snapshot of one agent's participation in a run. */
+export const AgentLifecycleSchema = z
+  .object({
+    name: text,
+    startedAt: iso,
+    finishedAt: iso.nullable(),
+  })
+  .strict()
+  .superRefine((agent, context) => {
+    if (agent.finishedAt && Date.parse(agent.finishedAt) < Date.parse(agent.startedAt))
+      context.addIssue({ code: "custom", message: "finishedAt must be >= startedAt" });
+  });
+/** Agent lifecycle records are kept as an array so the field can be added to a trace response. */
+export const AgentTimelineSchema = z.array(AgentLifecycleSchema);
 export const RunSchema = z
   .object({
     id: text,
@@ -325,6 +340,7 @@ export const TracePageSchema = z
     hasMore: z.boolean(),
     summary: TraceSummarySchema,
     publicRun: RunSchema.optional(),
+    agents: AgentTimelineSchema.optional(),
   })
   .strict();
 export const LaunchRequestSchema = z.object({ request: text, agentName: text }).strict();
@@ -386,6 +402,8 @@ export const WorkflowsResponseSchema = z
 
 export type Run = z.infer<typeof RunSchema>;
 export type StageRecord = z.infer<typeof StageRecordSchema>;
+export type AgentLifecycle = z.infer<typeof AgentLifecycleSchema>;
+export type AgentTimeline = z.infer<typeof AgentTimelineSchema>;
 export type WorkflowLaunchRequest = z.infer<typeof WorkflowLaunchRequestSchema>;
 export type WorkflowLaunchResponse = z.infer<typeof WorkflowLaunchResponseSchema>;
 export type DeletePlanResponse = z.infer<typeof DeletePlanResponseSchema>;

@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import {
   AgentsResponseSchema,
+  TracePageSchema,
   WorkflowLaunchResponseSchema,
   WorkflowsResponseSchema,
 } from "@software-factory/contracts";
@@ -701,13 +702,118 @@ test("trace API includes the validated public run metadata", async () => {
   try {
     const response = await fetch(new URL(`/api/runs/${run.id}/trace`, ui.url));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    const page = TracePageSchema.parse(await response.json());
+    expect(page).toMatchObject({
       publicRun: {
         id: run.id,
         status: "succeeded",
         metadata: { request: "inspect", agentName: "scout" },
       },
     });
+    expect(page.publicRun?.finishedAt).not.toBeNull();
+  } finally {
+    ui.close();
+  }
+});
+
+test("trace API includes agents independent of events and preserves pagination fields", async () => {
+  const root = await repo();
+  const storage = await openWorkflowStorage(root);
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(run.id);
+  storage.setAgentProcess(run.id, { agentName: "planner", executionKind: "embedded" });
+  storage.appendTrace({
+    runId: run.id,
+    at: "2026-01-01T00:00:00.000Z",
+    type: "agent_started",
+    agentName: "planner",
+  });
+  storage.setAgentProcess(run.id, { agentName: "scout", executionKind: "embedded" });
+  storage.clearAgentProcess(run.id, "planner");
+  storage.close();
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL(`/api/runs/${run.id}/trace?limit=1`, ui.url));
+    expect(response.status).toBe(200);
+    const page = TracePageSchema.parse(await response.json());
+    expect(page).toMatchObject({
+      runId: run.id,
+      hasMore: true,
+      summary: { cost: 0 },
+      publicRun: { id: run.id, status: "running" },
+    });
+    expect(page.events).toHaveLength(1);
+    expect(page.agents?.map(({ name }) => name)).toEqual(["planner", "scout"]);
+    expect(page.agents?.find(({ name }) => name === "scout")?.finishedAt).toBeNull();
+    for (const agent of page.agents ?? []) {
+      if (agent.finishedAt)
+        expect(Date.parse(agent.finishedAt)).toBeGreaterThanOrEqual(Date.parse(agent.startedAt));
+    }
+    expect(page.nextCursor).toEqual(expect.any(Number));
+  } finally {
+    ui.close();
+  }
+});
+
+test("trace and sessions aliases have identical additive pages and nullable running metadata", async () => {
+  const root = await repo();
+  const storage = await openWorkflowStorage(root);
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(run.id, "2026-01-01T00:00:00.000Z");
+  storage.appendTrace({
+    runId: run.id,
+    at: "2026-01-01T00:00:01.000Z",
+    type: "model_step",
+    agentName: "scout",
+    usage: { input: 2, output: 3, total: 5 },
+    cost: { amount: 0.25, currency: "USD" },
+  });
+  storage.close();
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const query = "?limit=1";
+    const runsAlias = TracePageSchema.parse(
+      await (await fetch(new URL(`/api/runs/${run.id}/trace${query}`, ui.url))).json(),
+    );
+    const sessionsAlias = TracePageSchema.parse(
+      await (await fetch(new URL(`/api/sessions/${run.id}/trace${query}`, ui.url))).json(),
+    );
+    expect(sessionsAlias).toEqual(runsAlias);
+    expect(runsAlias).toMatchObject({
+      runId: run.id,
+      hasMore: true,
+      summary: { usage: { input: 2, output: 3, total: 5 }, cost: 0.25 },
+      publicRun: { id: run.id, status: "running" },
+    });
+    expect(runsAlias.publicRun).not.toHaveProperty("finishedAt");
+    expect(runsAlias.events[0]).toHaveProperty("id");
+    expect(runsAlias.nextCursor).toEqual(expect.any(Number));
+
+    const tail = TracePageSchema.parse(
+      await (
+        await fetch(new URL(`/api/sessions/${run.id}/trace?after=${runsAlias.nextCursor}`, ui.url))
+      ).json(),
+    );
+    expect(tail.events).toHaveLength(1);
+    expect(tail.events[0]).toMatchObject({ runId: run.id, type: "model_step" });
+    expect(tail.hasMore).toBe(false);
+    expect(tail.summary).toEqual(runsAlias.summary);
+    expect(tail.publicRun).toEqual(runsAlias.publicRun);
+  } finally {
+    ui.close();
+  }
+});
+
+test("trace API returns an empty agents list when no agents participated", async () => {
+  const root = await repo();
+  const storage = await openWorkflowStorage(root);
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.close();
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(new URL(`/api/runs/${run.id}/trace`, ui.url));
+    expect(response.status).toBe(200);
+    expect(TracePageSchema.parse(await response.json()).agents).toEqual([]);
   } finally {
     ui.close();
   }

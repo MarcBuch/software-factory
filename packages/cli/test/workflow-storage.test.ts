@@ -120,6 +120,58 @@ test("migrates a pre-migration database and can be opened repeatedly", async () 
   second.close();
 });
 
+test("reconciles preexisting open agents on terminal runs when storage opens", async () => {
+  const root = await repo();
+  const storage = await openWorkflowStorage(root);
+  const terminal = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(terminal.id, "2026-01-01T00:00:00.000Z");
+  storage.setAgentProcess(terminal.id, { agentName: "stale", executionKind: "embedded" });
+  storage.finishRun(terminal.id, "succeeded", undefined, "2026-01-01T00:00:02.000Z");
+  storage.database
+    .query("UPDATE agents SET finished_at=NULL WHERE run_id=? AND agent_name='stale'")
+    .run(terminal.id);
+  storage.database
+    .query(
+      "INSERT INTO agents(run_id, agent_name, started_at, finished_at) VALUES (?, 'already-done', ?, ?)",
+    )
+    .run(terminal.id, "2026-01-01T00:00:01.000Z", "2026-01-01T00:00:01.500Z");
+
+  const running = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(running.id, "2026-01-01T00:00:00.000Z");
+  storage.setAgentProcess(running.id, { agentName: "still-running", executionKind: "embedded" });
+
+  const pendingWithFinishedAt = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.setAgentProcess(pendingWithFinishedAt.id, {
+    agentName: "pending-agent",
+    executionKind: "embedded",
+  });
+  storage.database
+    .query("UPDATE runs SET finished_at=? WHERE id=?")
+    .run("2026-01-01T00:00:02.000Z", pendingWithFinishedAt.id);
+  storage.close();
+
+  const reopened = await openWorkflowStorage(root);
+  expect(reopened.agents(terminal.id)).toEqual([
+    {
+      name: "stale",
+      startedAt: expect.any(String),
+      finishedAt: "2026-01-01T00:00:02.000Z",
+    },
+    {
+      name: "already-done",
+      startedAt: "2026-01-01T00:00:01.000Z",
+      finishedAt: "2026-01-01T00:00:01.500Z",
+    },
+  ]);
+  expect(reopened.agents(running.id)).toEqual([
+    { name: "still-running", startedAt: expect.any(String), finishedAt: null },
+  ]);
+  expect(reopened.agents(pendingWithFinishedAt.id)).toEqual([
+    { name: "pending-agent", startedAt: expect.any(String), finishedAt: null },
+  ]);
+  reopened.close();
+});
+
 test("migrates legacy stage ordinals and makes ordered terminal transitions atomic", async () => {
   const root = await databaseRoot();
   const database = new Database(join(root, ".factory", "workflow.sqlite"));
@@ -260,16 +312,129 @@ test("serializes cancellation requests against success and failure completion", 
   storage.close();
 });
 
+test("closes open agents with the terminal timestamp", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const terminalAt = "2027-01-02T03:04:05.000Z";
+
+  const makeRunning = async () => {
+    const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+    storage.startRun(run.id);
+    storage.setAgentProcess(run.id, { agentName: "open-a", executionKind: "embedded" });
+    storage.setAgentProcess(run.id, { agentName: "open-b", executionKind: "embedded" });
+    storage.setAgentProcess(run.id, { agentName: "already-done", executionKind: "embedded" });
+    storage.clearAgentProcess(run.id, "already-done");
+    return run;
+  };
+
+  const expectAgentsClosed = (runId: string) => {
+    expect(storage.agents(runId)).toEqual([
+      expect.objectContaining({ name: "open-a", finishedAt: terminalAt }),
+      expect.objectContaining({ name: "open-b", finishedAt: terminalAt }),
+      expect.objectContaining({ name: "already-done" }),
+    ]);
+    expect(storage.agents(runId).find(({ name }) => name === "already-done")?.finishedAt).not.toBe(
+      terminalAt,
+    );
+  };
+
+  const succeeded = await makeRunning();
+  storage.finishRun(succeeded.id, "succeeded", undefined, terminalAt);
+  expectAgentsClosed(succeeded.id);
+
+  const failed = await makeRunning();
+  storage.finishRun(failed.id, "failed", { code: "FAILURE", message: "x" }, terminalAt);
+  expectAgentsClosed(failed.id);
+
+  const cancelled = await makeRunning();
+  expect(storage.requestCancellation(cancelled.id).accepted).toBe(true);
+  storage.finishRun(cancelled.id, "succeeded", undefined, terminalAt);
+  expectAgentsClosed(cancelled.id);
+
+  const orphaned = await makeRunning();
+  storage.failRun(orphaned.id, { code: "FAILURE", message: "x" }, terminalAt);
+  expectAgentsClosed(orphaned.id);
+  storage.close();
+});
+
+test("ignores late agent process updates after a run is terminal", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.startRun(run.id);
+  storage.setAgentProcess(run.id, { agentName: "builder", pid: 123 });
+  storage.finishRun(run.id, "succeeded", undefined, "2027-01-02T03:04:05.000Z");
+
+  storage.setAgentProcess(run.id, { agentName: "builder", pid: 456 });
+  storage.setAgentProcess(run.id, { agentName: "late-agent", pid: 789 });
+
+  expect(storage.getRun(run.id)).toMatchObject({
+    status: "succeeded",
+    finishedAt: "2027-01-02T03:04:05.000Z",
+  });
+  expect(storage.agents(run.id)).toEqual([
+    expect.objectContaining({ name: "builder", finishedAt: "2027-01-02T03:04:05.000Z" }),
+  ]);
+  storage.close();
+});
+
+test("preserves agents and run ownership for late callbacks in every terminal state", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const terminalStatuses = ["succeeded", "failed", "cancelled"] as const;
+
+  for (const status of terminalStatuses) {
+    const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+    storage.startRun(run.id);
+    storage.setAgentProcess(run.id, {
+      agentName: "builder",
+      pid: 123,
+      identity: "original-process",
+      sessionId: "original-session",
+    });
+    if (status === "cancelled") storage.requestCancellation(run.id);
+    storage.finishRun(
+      run.id,
+      status,
+      status === "failed" ? { code: "FAILURE", message: "x" } : undefined,
+    );
+
+    const agentsBefore = storage.agents(run.id);
+    const ownershipBefore = storage.getRun(run.id);
+    storage.setAgentProcess(run.id, {
+      agentName: "builder",
+      pid: 456,
+      identity: "late-process",
+      sessionId: "late-session",
+    });
+    storage.setAgentProcess(run.id, {
+      agentName: "late-agent",
+      pid: 789,
+      identity: "late-process",
+      sessionId: "late-session",
+    });
+
+    expect(storage.agents(run.id)).toEqual(agentsBefore);
+    expect(storage.getRun(run.id)).toEqual(ownershipBefore);
+  }
+  storage.close();
+});
+
 test("updates pid and backend session and cleans partial artifacts", async () => {
   const root = await repo();
   const storage = await openWorkflowStorage(root);
   const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
-  storage.setAgentProcess(run.id, { agentName: "builder", pid: 123, sessionId: "session" });
+  storage.setAgentProcess(run.id, {
+    agentName: "builder",
+    pid: 123,
+    identity: "verified-process",
+    sessionId: "session",
+  });
   expect(storage.getRun(run.id)).toMatchObject({ childPid: 123, sessionId: "session" });
-  storage.setAgentProcess(run.id, { agentName: "builder", pid: 123 });
+  storage.setAgentProcess(run.id, { agentName: "builder", pid: 123, identity: "verified-process" });
   expect(storage.getRun(run.id)?.sessionId).toBe("session");
-  storage.clearAgentProcess(run.id);
-  expect(storage.getRun(run.id)).toMatchObject({ sessionId: "session" });
+  storage.clearAgentProcess(run.id, "builder");
+  expect(storage.getRun(run.id)).toMatchObject({
+    childPid: 123,
+    sessionId: "session",
+  });
   storage.startRun(run.id);
   const bad: any = {};
   bad.self = bad;
@@ -279,6 +444,122 @@ test("updates pid and backend session and cleans partial artifacts", async () =>
   expect(
     (await Bun.$`ls -1 ${join(root, ".factory", "runs")}`.text()).trim().split("\n"),
   ).toHaveLength(1);
+  storage.close();
+});
+
+test("persists run ownership before the first agent stage without an agent row", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({
+    systemPrompt: "s",
+    userPrompt: "u",
+    stages: [{ id: "agent", kind: "agent", agent: "builder", label: "Builder" }],
+  });
+  storage.startRun(run.id);
+  storage.setRunProcess(run.id, {
+    pid: 123,
+    identity: "verified-process",
+    executionKind: "subprocess",
+  });
+
+  expect(storage.getRun(run.id)).toMatchObject({ childPid: 123, executionKind: "subprocess" });
+  expect(storage.agents(run.id)).toEqual([]);
+  expect(
+    storage.database
+      .query("SELECT COUNT(*) AS count FROM trace_events WHERE run_id=? AND type LIKE 'agent_%'")
+      .get(run.id),
+  ).toEqual({ count: 0 });
+
+  storage.setRunProcess(run.id, { pid: 456, executionKind: "subprocess" });
+  expect(storage.getRun(run.id)).not.toMatchObject({ childPid: 456 });
+  storage.close();
+});
+
+test("does not persist late run ownership for terminal runs", async () => {
+  const storage = await openWorkflowStorage(await repo());
+
+  const pending = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.setRunProcess(pending.id, {
+    pid: 100,
+    identity: "pending-process",
+    sessionId: "pending-session",
+    executionKind: "subprocess",
+  });
+  expect(storage.getRun(pending.id)).toMatchObject({
+    childPid: 100,
+    processIdentity: "pending-process",
+    sessionId: "pending-session",
+  });
+
+  for (const [status, pid] of [
+    ["succeeded", 200],
+    ["failed", 300],
+    ["cancelled", 400],
+  ] as const) {
+    const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+    storage.startRun(run.id);
+    storage.setRunProcess(run.id, {
+      pid: pid - 1,
+      identity: "initial-process",
+      sessionId: "initial-session",
+      executionKind: "subprocess",
+    });
+    storage.finishRun(
+      run.id,
+      status,
+      status === "failed" ? { code: "FAILURE", message: "x" } : undefined,
+    );
+    storage.setRunProcess(run.id, {
+      pid,
+      identity: "late-process",
+      sessionId: "late-session",
+      executionKind: "subprocess",
+    });
+
+    expect(storage.getRun(run.id)).toMatchObject({
+      status,
+      childPid: pid - 1,
+      processIdentity: "initial-process",
+      sessionId: "initial-session",
+    });
+  }
+
+  storage.close();
+});
+
+test("does not persist an unverified subprocess PID from agent participation", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.setAgentProcess(run.id, { agentName: "builder", pid: 123, executionKind: "subprocess" });
+
+  expect(storage.getRun(run.id)?.childPid).toBeUndefined();
+  expect(storage.agents(run.id)).toMatchObject([{ name: "builder" }]);
+  storage.close();
+});
+
+test("persists agent timelines independently from trace events", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const run = await storage.createRun({ systemPrompt: "s", userPrompt: "u" });
+  storage.setAgentProcess(run.id, { agentName: "active", pid: 123 });
+  storage.setAgentProcess(run.id, { agentName: "unobserved", pid: 456 });
+  storage.appendTrace({
+    runId: run.id,
+    at: "2026-01-01T00:00:01.000Z",
+    type: "agent_started",
+    agentName: "active",
+  });
+  storage.clearAgentProcess(run.id, "active");
+  const agents = storage.agents(run.id);
+  expect(agents).toHaveLength(2);
+  expect(agents.map(({ name }) => name)).toEqual(["active", "unobserved"]);
+  expect(agents.every(({ startedAt }) => startedAt.length > 0)).toBe(true);
+  expect(agents.find(({ name }) => name === "active")?.finishedAt).not.toBeNull();
+  expect(agents.find(({ name }) => name === "unobserved")?.finishedAt).toBeNull();
+
+  storage.clearAgentProcess(run.id, "unobserved");
+  expect(storage.agents(run.id).every(({ finishedAt }) => finishedAt !== null)).toBe(true);
+
+  storage.setAgentProcess(run.id, { agentName: "active", pid: 789 });
+  expect(storage.agents(run.id).find(({ name }) => name === "active")?.finishedAt).toBeNull();
   storage.close();
 });
 
@@ -338,6 +619,36 @@ test("supports newest-first run pages and incremental trace polling", async () =
   const tail = storage.tracePage(first.id, { after: trace.nextCursor });
   expect(tail.events).toHaveLength(1);
   expect(storage.tracePage(first.id, { after: tail.nextCursor }).events).toHaveLength(0);
+  storage.close();
+});
+
+test("scopes trace pages and agent retrieval to the requested run", async () => {
+  const storage = await openWorkflowStorage(await repo());
+  const first = await storage.createRun({ systemPrompt: "s", userPrompt: "one" });
+  const second = await storage.createRun({ systemPrompt: "s", userPrompt: "two" });
+  storage.appendTrace({
+    runId: first.id,
+    at: "2026-01-01T00:00:01.000Z",
+    type: "error",
+    message: "first",
+  });
+  storage.appendTrace({
+    runId: second.id,
+    at: "2026-01-01T00:00:02.000Z",
+    type: "error",
+    message: "second",
+  });
+  storage.setAgentProcess(first.id, { agentName: "first", executionKind: "embedded" });
+  storage.setAgentProcess(second.id, { agentName: "second", executionKind: "embedded" });
+
+  expect(storage.tracePage(first.id).events).toEqual([
+    expect.objectContaining({ runId: first.id, message: "first" }),
+  ]);
+  expect(storage.tracePage(second.id).events).toEqual([
+    expect.objectContaining({ runId: second.id, message: "second" }),
+  ]);
+  expect(storage.agents(first.id).map(({ name }) => name)).toEqual(["first"]);
+  expect(storage.agents(second.id).map(({ name }) => name)).toEqual(["second"]);
   storage.close();
 });
 

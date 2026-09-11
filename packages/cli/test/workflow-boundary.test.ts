@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import type { BackendAdapter } from "../src/backend";
 import { lookupRegistry } from "../src/roster";
 import { startWorkflow, validateRuntimeRequirements } from "../src/workflow-service";
+import { openWorkflowStorage } from "../src/workflow-storage";
 
 const execFile = promisify(nodeExecFile);
 
@@ -219,6 +220,41 @@ test("an untouched Scout succeeds with the same boundary policy", async () => {
       },
     );
     expect((await launch.completion)?.status).toBe("succeeded");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unverified subprocess is never persisted by an agent stage transition", async () => {
+  const root = await repository();
+  try {
+    const adapter: BackendAdapter = {
+      id: "fake-unverified-process",
+      capabilities: ["repository.read"],
+      start: () => ({ ...fakeProcess(), pid: 99999999 }),
+    };
+    const launch = await startWorkflow(
+      root,
+      { agentName: "scout", request: "inspect" },
+      {
+        adapter,
+        executorFactory: () => ({
+          async execute() {
+            return {
+              kind: "success" as const,
+              attempts: 1,
+              result: { status: "success" as const, summary: "ok", artifacts: [], notes: [] },
+              events: [],
+            };
+          },
+        }),
+      },
+    );
+    await launch.completion;
+    const storage = await openWorkflowStorage(root);
+    expect(storage.getRun(launch.run.id)?.childPid).toBeUndefined();
+    expect(storage.agents(launch.run.id)).toMatchObject([{ name: "scout" }]);
+    storage.close();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

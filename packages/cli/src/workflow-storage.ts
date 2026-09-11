@@ -88,6 +88,8 @@ export type AgentProcess = {
   executionKind?: "subprocess" | "service" | "embedded";
 };
 
+export type RunProcess = Omit<AgentProcess, "agentName"> & { identity?: string };
+
 function runId() {
   return `run_${crypto.randomUUID().replaceAll("-", "")}`;
 }
@@ -126,6 +128,7 @@ export class WorkflowStorage {
     const storage = new WorkflowStorage(repositoryRoot, database);
     storage.database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     storage.migrate();
+    storage.reconcileOpenAgentsForTerminalRuns();
     return storage;
   }
 
@@ -214,6 +217,25 @@ export class WorkflowStorage {
       // Do not catch this: a malformed/incompatible database must prevent startup.
       this.database.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
     }
+  }
+
+  /** Repairs agent rows left open by older terminal-run completion paths. */
+  private reconcileOpenAgentsForTerminalRuns() {
+    this.database.transaction(() => {
+      this.database
+        .query(
+          `UPDATE agents
+           SET finished_at = (SELECT finished_at FROM runs WHERE runs.id = agents.run_id)
+            WHERE agents.finished_at IS NULL
+              AND EXISTS (
+                SELECT 1 FROM runs
+                WHERE runs.id = agents.run_id
+                  AND runs.status IN ('succeeded', 'failed', 'cancelled')
+                  AND runs.finished_at IS NOT NULL
+              )`,
+        )
+        .run();
+    })();
   }
 
   async createRun(input: RunInit): Promise<RunRecord> {
@@ -372,6 +394,7 @@ export class WorkflowStorage {
         if (finished?.status === "running") throw Error(`Cannot finish run: ${id}`);
         return;
       }
+      this.closeOpenAgents(id, at);
       this.database
         .query(
           "UPDATE workflow_stages SET status='skipped', finished_at=?, failure=NULL WHERE run_id=? AND status='pending'",
@@ -398,24 +421,58 @@ export class WorkflowStorage {
 
   setAgentProcess(runId: string, processInfo: AgentProcess & { identity?: string }) {
     const sessionId = processInfo.sessionId || this.getRun(runId)?.sessionId;
-    this.database
-      .query(`INSERT INTO agents(run_id, agent_name, child_pid, session_id, started_at)
-      VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, agent_name) DO UPDATE SET child_pid=excluded.child_pid, session_id=excluded.session_id`)
-      .run(
-        runId,
-        processInfo.agentName,
-        processInfo.executionKind === "service" || processInfo.executionKind === "embedded"
-          ? null
-          : (processInfo.pid ?? null),
-        sessionId ?? null,
-        iso(),
-      );
+    const startedAt = iso();
+    this.database.transaction(() => {
+      this.database
+        .query(`INSERT INTO agents(run_id, agent_name, child_pid, session_id, started_at)
+         SELECT ?, ?, ?, ?, ?
+         WHERE EXISTS (SELECT 1 FROM runs WHERE id=? AND status NOT IN ('succeeded', 'failed', 'cancelled'))
+         ON CONFLICT(run_id, agent_name) DO UPDATE SET child_pid=excluded.child_pid, session_id=excluded.session_id, started_at=CASE WHEN agents.finished_at IS NULL THEN agents.started_at ELSE excluded.started_at END, finished_at=NULL
+         WHERE EXISTS (SELECT 1 FROM runs WHERE id=? AND status NOT IN ('succeeded', 'failed', 'cancelled'))`)
+        .run(
+          runId,
+          processInfo.agentName,
+          processInfo.executionKind === "service" ||
+            processInfo.executionKind === "embedded" ||
+            !processInfo.identity
+            ? null
+            : (processInfo.pid ?? null),
+          sessionId ?? null,
+          startedAt,
+          runId,
+          runId,
+        );
+      this.database
+        .query(
+          "UPDATE runs SET child_pid=?, session_id=?, process_identity=?, execution_kind=? WHERE id=? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
+        )
+        .run(
+          processInfo.executionKind === "service" ||
+            processInfo.executionKind === "embedded" ||
+            !processInfo.identity
+            ? null
+            : (processInfo.pid ?? null),
+          sessionId ?? null,
+          processInfo.executionKind === "service" || processInfo.executionKind === "embedded"
+            ? null
+            : (processInfo.identity ?? null),
+          processInfo.executionKind ?? (processInfo.pid ? "subprocess" : null),
+          runId,
+        );
+    })();
+  }
+
+  /** Persist run ownership independently of agent participation. */
+  setRunProcess(runId: string, processInfo: RunProcess) {
+    const sessionId = processInfo.sessionId || this.getRun(runId)?.sessionId;
     this.database
       .query(
-        "UPDATE runs SET child_pid=?, session_id=?, process_identity=?, execution_kind=? WHERE id=?",
+        "UPDATE runs SET child_pid=?, session_id=?, process_identity=?, execution_kind=? WHERE id=? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
       )
       .run(
-        processInfo.executionKind === "service" || processInfo.executionKind === "embedded"
+        processInfo.executionKind === "service" ||
+          processInfo.executionKind === "embedded" ||
+          !processInfo.identity
           ? null
           : (processInfo.pid ?? null),
         sessionId ?? null,
@@ -427,10 +484,37 @@ export class WorkflowStorage {
       );
   }
 
-  clearAgentProcess(runId: string) {
+  clearAgentProcess(runId: string, agentName: string) {
     this.database
-      .query("UPDATE runs SET child_pid=NULL, process_identity=NULL WHERE id=?")
-      .run(runId);
+      .query(
+        "UPDATE agents SET finished_at=? WHERE run_id=? AND agent_name=? AND finished_at IS NULL",
+      )
+      .run(iso(), runId, agentName);
+  }
+
+  private closeOpenAgents(runId: string, at: string) {
+    this.database
+      .query("UPDATE agents SET finished_at=? WHERE run_id=? AND finished_at IS NULL")
+      .run(at, runId);
+  }
+
+  /** Returns every persisted agent participation for a run, including agents without trace events. */
+  agents(runId: string) {
+    return this.database
+      .query<
+        { agent_name: string; started_at: string | null; finished_at: string | null },
+        [string]
+      >("SELECT agent_name, started_at, finished_at FROM agents WHERE run_id=? ORDER BY rowid")
+      .all(runId)
+      .map((agent) => ({
+        name: agent.agent_name,
+        startedAt: agent.started_at,
+        finishedAt: agent.finished_at,
+      }))
+      .filter(
+        (agent): agent is { name: string; startedAt: string; finishedAt: string | null } =>
+          agent.startedAt !== null,
+      );
   }
 
   failIfRunning(runId: string, failure: Run["failure"]) {
@@ -462,6 +546,7 @@ export class WorkflowStorage {
         failed = this.getRun(runId);
         return;
       }
+      this.closeOpenAgents(runId, at);
       this.appendTrace({ runId, at, type: "run_finished", status: "failed" });
       failed = this.getRun(runId);
     })();

@@ -477,6 +477,7 @@ export async function startUiServer(options: UiServerOptions) {
             hasMore: page.hasMore,
             summary,
             publicRun: publicRun(run),
+            agents: storage.agents(runId),
           });
         }
         if (path === "/api/events" || path === "/api/sessions/events") {

@@ -132,21 +132,32 @@ export async function stopWorkflow(
     const run = storage.getRun(runId);
     if (!run) throw Error(`Run not found: ${runId}`);
     if (run.status !== "running") return run;
-    const processRun = activeProcesses.get(`${resolve(repositoryRoot)}:${runId}`);
+    const clearActiveAgents = () => {
+      for (const participation of storage.agents(runId)) {
+        if (!participation.finishedAt) storage.clearAgentProcess(runId, participation.name);
+      }
+    };
+    const processRoot = await realpath(resolve(repositoryRoot));
+    const processRun = activeProcesses.get(`${processRoot}:${runId}`);
     const service =
       run.executionKind === "service" ||
       run.executionKind === "embedded" ||
       processRun?.executionKind === "service" ||
       processRun?.executionKind === "embedded";
     if (!service && processRun) {
-      if (!run.childPid || run.childPid !== processRun.pid || !run.processIdentity)
+      if (run.childPid && run.childPid !== processRun.pid)
         throw Error("Cannot safely stop unverifiable process");
+      // A live handle is not proof that the handle still refers to the backend
+      // we started. Require the persisted identity before sending a signal,
+      // including for same-process callers.
+      if (!run.processIdentity) throw Error("Cannot safely stop unverifiable process");
       const current = await processIdentity(processRun.pid, processRun.command);
       if (current !== run.processIdentity) throw Error("Stale backend process identity");
       const cancellation = storage.requestCancellation(runId);
       if (!cancellation.accepted) return cancellation.run;
       processRun.cancel();
       await processRun.exit;
+      clearActiveAgents();
       return storage.finishRun(runId, "cancelled");
     }
     if (!service) throw Error("Cannot safely stop unverifiable process");
@@ -167,6 +178,7 @@ export async function stopWorkflow(
         const active = await options.serviceClient.session.active();
         if (active && Object.prototype.hasOwnProperty.call(active, run.sessionId))
           await options.serviceClient.session.interrupt({ sessionID: run.sessionId });
+        clearActiveAgents();
         return storage.finishRun(runId, "cancelled");
       } catch (error) {
         return storage.failRun(runId, {
@@ -179,6 +191,7 @@ export async function stopWorkflow(
     if (!cancellation.accepted) return cancellation.run;
     processRun?.cancel();
     if (processRun) await processRun.exit;
+    clearActiveAgents();
     return storage.finishRun(runId, "cancelled");
   } finally {
     storage.close();
@@ -463,6 +476,7 @@ export async function restoreFactoryState(
 async function terminalFailure(
   storage: Awaited<ReturnType<typeof openWorkflowStorage>>,
   run: RunRecord,
+  agentName: string,
   error: unknown,
 ) {
   const message = errorMessage(error);
@@ -475,7 +489,7 @@ async function terminalFailure(
     message,
   });
   try {
-    storage.clearAgentProcess(run.id);
+    storage.clearAgentProcess(run.id, agentName);
   } catch {
     /* best effort */
   }
@@ -622,30 +636,25 @@ export async function startWorkflow(
       return { run: failed ?? run, completion: Promise.resolve(failed) };
     }
 
+    // Keep the in-process ownership visible before doing the asynchronous
+    // identity lookup so same-process callers can still stop startup. Do not
+    // persist a PID until its identity is available, though: another CLI must
+    // never observe a killable process without the proof needed to verify it.
+    activeProcesses.set(`${root}:${run.id}`, processRun);
     let identity: string | undefined;
     try {
       identity = await processIdentity(processRun.pid, processRun.command);
     } catch {
       /* process may have exited */
     }
-    storage.setAgentProcess(run.id, {
-      agentName: agent.name,
-      ...(processRun.executionKind === "service" || processRun.executionKind === "embedded"
+    storage.setRunProcess(
+      run.id,
+      processRun.executionKind === "service" || processRun.executionKind === "embedded"
         ? { executionKind: processRun.executionKind }
-        : {
-            pid: processRun.pid,
-            ...(identity ? { identity } : {}),
-            executionKind: "subprocess" as const,
-          }),
-    });
-    storage.appendTrace({
-      runId: run.id,
-      at: new Date().toISOString(),
-      type: "agent_started",
-      agentName: agent.name,
-    });
-
-    activeProcesses.set(`${root}:${run.id}`, processRun);
+        : identity
+          ? { pid: processRun.pid, identity, executionKind: "subprocess" }
+          : { executionKind: "subprocess" },
+    );
     // Keep the repository lock until completeWorkflow has finished its boundary
     // comparison and any restoration. Embedded sessions may share a host, but
     // mutating workflows in one repository must not overlap their snapshots.
@@ -661,13 +670,14 @@ export async function startWorkflow(
       root,
       lock,
       adapter,
+      processIdentity: identity,
       executorFactory: options.executorFactory,
       boundaryOptions,
     });
     return { run, completion };
   } catch (error) {
     if (storage && run && processStarted) {
-      const failed = await terminalFailure(storage, run, error);
+      const failed = await terminalFailure(storage, run, agent.name, error);
       storage.close();
       await lock.release();
       return { run: failed ?? run, completion: Promise.resolve(failed) };
@@ -690,6 +700,7 @@ async function completeWorkflow(args: {
   root: string;
   lock: WorkflowLock;
   adapter: AgentRuntimeAdapter;
+  processIdentity?: string;
   executorFactory?: (adapter: AgentRuntimeAdapter) => AgentExecutorLike;
   boundaryOptions: Parameters<typeof compareGitBoundary>[1];
 }): Promise<RunRecord | undefined> {
@@ -705,9 +716,11 @@ async function completeWorkflow(args: {
     root,
     lock,
     adapter,
+    processIdentity: processIdentityValue,
     boundaryOptions,
   } = args;
   const currentArtifact = join(root, ".factory", "architecture", `${run.id}.html`);
+  let activeStageAgent: string | undefined;
   try {
     if (agent.name === "planner" && (await lstat(currentArtifact).catch(() => undefined)))
       throw Error("Planner architecture artifact must not pre-exist");
@@ -797,48 +810,92 @@ async function completeWorkflow(args: {
           : {},
       transition: (stage) => {
         const current = storage.getRun(run.id);
-        if (current?.status === "running")
+        if (current?.status === "running") {
           storage.transitionStage(run.id, stage.id, stage.status, stage.failure);
+          if (stage.status === "running" && stage.kind === "agent")
+            storage.setAgentProcess(run.id, {
+              agentName: stage.agent,
+              ...(processRun.executionKind === "service" || processRun.executionKind === "embedded"
+                ? { executionKind: processRun.executionKind }
+                : processIdentityValue
+                  ? {
+                      pid: processRun.pid,
+                      identity: processIdentityValue,
+                      executionKind: "subprocess" as const,
+                    }
+                  : { executionKind: "subprocess" as const }),
+            });
+        }
       },
       isCancelled: () => storage.getRun(run.id)?.cancellationRequested === true,
       runAgent: async (stage) => {
-        outcome = await executor.execute(
-          { ...invocation, agent: { ...invocation.agent, id: stage.agent } },
-          async (event, activeProcess) => {
-            await storage.appendRaw(run.id, event);
-            if (event.normalized) storage.appendTrace(event.normalized);
-            let identity: string | undefined;
-            try {
-              identity = await processIdentity(activeProcess.pid, activeProcess.command);
-            } catch {
-              /* exited between event and ps */
-            }
-            storage.setAgentProcess(run.id, {
-              agentName: agent.name,
-              ...(activeProcess.executionKind === "service" ||
-              activeProcess.executionKind === "embedded"
-                ? { executionKind: activeProcess.executionKind }
-                : {
-                    pid: activeProcess.pid,
-                    ...(identity ? { identity } : {}),
-                    executionKind: "subprocess" as const,
-                  }),
-              // Storage keeps its legacy column for migration compatibility; the
-              // backend seam itself remains provider-neutral.
-              sessionId: event.executionId,
-            });
-          },
-        );
-        if (outcome && "result" in outcome) result = outcome.result;
-        if (outcome.kind !== "success")
-          throw Error(
-            outcome.kind === "invalid_output_exhausted"
-              ? outcome.reason
-              : outcome.kind === "agent_failure"
-                ? outcome.result.summary
-                : "Backend failed before producing an agent result",
+        activeStageAgent = stage.agent;
+        let stageResult: any;
+        try {
+          storage.appendTrace({
+            runId: run.id,
+            at: new Date().toISOString(),
+            type: "agent_started",
+            agentName: stage.agent,
+          });
+          outcome = await executor.execute(
+            { ...invocation, agent: { ...invocation.agent, id: stage.agent } },
+            async (event, activeProcess) => {
+              await storage.appendRaw(run.id, event);
+              if (event.normalized) storage.appendTrace(event.normalized);
+              let activeIdentity: string | undefined;
+              try {
+                activeIdentity = await processIdentity(activeProcess.pid, activeProcess.command);
+              } catch {
+                /* exited between event and ps */
+              }
+              storage.setAgentProcess(run.id, {
+                agentName: stage.agent,
+                ...(activeProcess.executionKind === "service" ||
+                activeProcess.executionKind === "embedded"
+                  ? { executionKind: activeProcess.executionKind }
+                  : activeIdentity
+                    ? {
+                        pid: activeProcess.pid,
+                        identity: activeIdentity,
+                        executionKind: "subprocess" as const,
+                      }
+                    : { executionKind: "subprocess" as const }),
+                // Storage keeps its legacy column for migration compatibility; the
+                // backend seam itself remains provider-neutral.
+                sessionId: event.executionId,
+              });
+            },
           );
-        if (result?.status !== "success") throw Error(result?.summary ?? "Agent stage failed");
+          if (outcome && "result" in outcome) {
+            result = outcome.result;
+            stageResult = outcome.result;
+          }
+          if (outcome.kind !== "success")
+            throw Error(
+              outcome.kind === "invalid_output_exhausted"
+                ? outcome.reason
+                : outcome.kind === "agent_failure"
+                  ? outcome.result.summary
+                  : "Backend failed before producing an agent result",
+            );
+          if (result?.status !== "success") throw Error(result?.summary ?? "Agent stage failed");
+        } finally {
+          storage.appendTrace({
+            runId: run.id,
+            at: new Date().toISOString(),
+            type: "agent_finished",
+            agentName: stage.agent,
+            result: stageResult ?? {
+              status: "failure",
+              summary: "Agent stage did not produce a result",
+              artifacts: [],
+              notes: [],
+            },
+          });
+          storage.clearAgentProcess(run.id, stage.agent);
+          activeStageAgent = undefined;
+        }
       },
     });
     await runner.run();
@@ -862,14 +919,6 @@ async function completeWorkflow(args: {
             notes: [],
           });
     if ("result" in finalOutcome) await storage.writeResult(run.id, result);
-    storage.appendTrace({
-      runId: run.id,
-      at: new Date().toISOString(),
-      type: "agent_finished",
-      agentName: agent.name,
-      result,
-    });
-
     const comparison = await compareGitBoundary(boundary, boundaryOptions);
     let boundaryFailure: string | undefined;
     let restorationFailure: string | undefined;
@@ -919,11 +968,11 @@ async function completeWorkflow(args: {
       failure += `; Git boundary check failed: ${errorMessage(boundaryError)}`;
     }
     await rm(currentArtifact, { force: true }).catch(() => undefined);
-    return terminalFailure(storage, run, Error(failure));
+    return terminalFailure(storage, run, activeStageAgent ?? agent.name, Error(failure));
   } finally {
     activeProcesses.delete(`${root}:${run.id}`);
     try {
-      storage.clearAgentProcess(run.id);
+      if (activeStageAgent) storage.clearAgentProcess(run.id, activeStageAgent);
     } catch {
       /* best effort */
     }

@@ -415,7 +415,15 @@ workflowStop.action(async (id: string, _, cmd) => {
       let stopped;
       try {
         stopped = storage.finishRun(id, "cancelled");
-        storage.clearAgentProcess(id);
+        const metadata = stopped?.metadata ?? run.metadata;
+        const metadataAgent =
+          metadata && typeof metadata === "object" && "agentName" in metadata
+            ? metadata.agentName
+            : undefined;
+        const activeAgent = storage.agents(id).find((agent) => agent.finishedAt === null)?.name;
+        const agentName =
+          activeAgent ?? (typeof metadataAgent === "string" ? metadataAgent : undefined);
+        if (agentName) storage.clearAgentProcess(id, agentName);
       } catch (error) {
         const latest = storage.getRun(id);
         if (!latest || latest.status === "running") throw error;
