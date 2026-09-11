@@ -874,3 +874,134 @@ test("plans API returns an empty list when plan storage is absent", async () => 
     ui.close();
   }
 });
+
+test("artifact API serves a declared architecture document", async () => {
+  const root = await repo();
+  const artifactPath = "docs/brief.html";
+  const contents = "<!doctype html><h1>brief</h1>";
+  await mkdir(join(root, "docs"), { recursive: true });
+  await writeFile(join(root, artifactPath), contents);
+  const file = join(root, ".factory", "plans.jsonl");
+  const plan = await createDraftPlan(
+    { ...PLAN_INPUT_EXAMPLE, externalArtifacts: [{ path: artifactPath }] },
+    file,
+  );
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(
+      new URL(
+        `/api/plans/${encodeURIComponent(plan.id)}/artifact?path=${encodeURIComponent(artifactPath)}`,
+        ui.url,
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(contents);
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("content-security-policy")).toBe("sandbox");
+  } finally {
+    ui.close();
+  }
+});
+
+test("artifact API rejects unauthorized and unsupported requests", async () => {
+  const root = await repo();
+  const htmlPath = "docs/brief.html";
+  const notesPath = "notes.md";
+  await mkdir(join(root, "docs"), { recursive: true });
+  await writeFile(join(root, htmlPath), "<!doctype html><h1>brief</h1>");
+  await writeFile(join(root, notesPath), "notes");
+  const file = join(root, ".factory", "plans.jsonl");
+  const plan = await createDraftPlan(
+    {
+      ...PLAN_INPUT_EXAMPLE,
+      externalArtifacts: [{ path: htmlPath }, { path: notesPath }],
+    },
+    file,
+  );
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    for (const [planId, artifactPath] of [
+      ["pln_missing", htmlPath],
+      [plan.id, "docs/other.html"],
+      [plan.id, "../../etc/passwd"],
+      [plan.id, notesPath],
+    ]) {
+      const response = await fetch(
+        new URL(
+          `/api/plans/${encodeURIComponent(planId)}/artifact?path=${encodeURIComponent(artifactPath)}`,
+          ui.url,
+        ),
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: "not found" });
+    }
+  } finally {
+    ui.close();
+  }
+});
+
+test("artifact API reports a declared artifact missing from disk", async () => {
+  const root = await repo();
+  const artifactPath = "docs/brief.html";
+  await mkdir(join(root, "docs"), { recursive: true });
+  const artifactFile = join(root, artifactPath);
+  await writeFile(artifactFile, "<!doctype html><h1>brief</h1>");
+  const file = join(root, ".factory", "plans.jsonl");
+  const plan = await createDraftPlan(
+    { ...PLAN_INPUT_EXAMPLE, externalArtifacts: [{ path: artifactPath }] },
+    file,
+  );
+  await rm(artifactFile);
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(
+      new URL(
+        `/api/plans/${encodeURIComponent(plan.id)}/artifact?path=${encodeURIComponent(artifactPath)}`,
+        ui.url,
+      ),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "artifact file is missing" });
+  } finally {
+    ui.close();
+  }
+});
+
+test("artifact API authorizes against the latest plan revision", async () => {
+  const root = await repo();
+  const artifactPath = "docs/brief.html";
+  await mkdir(join(root, "docs"), { recursive: true });
+  await writeFile(join(root, artifactPath), "<!doctype html><h1>brief</h1>");
+  const file = join(root, ".factory", "plans.jsonl");
+  const first = await createDraftPlan(
+    { ...PLAN_INPUT_EXAMPLE, externalArtifacts: [{ path: artifactPath }] },
+    file,
+  );
+  const latest = {
+    ...first,
+    revision: 2,
+    status: "draft" as const,
+    externalArtifacts: [],
+    createdAt: new Date(Date.parse(first.createdAt) + 1_000).toISOString(),
+    updatedAt: new Date(Date.parse(first.updatedAt) + 1_000).toISOString(),
+  };
+  await savePlans(
+    [{ ...first, status: "superseded", approvedAt: first.updatedAt }, latest],
+    [],
+    file,
+  );
+  const ui = await startUiServer({ repositoryRoot: root, port: 0 });
+  try {
+    const response = await fetch(
+      new URL(
+        `/api/plans/${encodeURIComponent(first.id)}/artifact?path=${encodeURIComponent(artifactPath)}`,
+        ui.url,
+      ),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "not found" });
+  } finally {
+    ui.close();
+  }
+});

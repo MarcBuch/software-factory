@@ -21,7 +21,7 @@ import {
   errorDetails,
   type LifecycleDiagnosticSink,
 } from "./lifecycle-diagnostics";
-import { deletePlanCascadeAtomic, loadPlans } from "./plans";
+import { deletePlanCascadeAtomic, loadPlans, resolveArtifactFile } from "./plans";
 import { BUILTIN_REGISTRY, lookupRegistry, lookupRoster } from "./roster";
 import { recoverFactoryTransaction, withFactoryLock } from "./storage";
 import { UiHostManager, type UiHostFactory } from "./ui-host-manager";
@@ -274,6 +274,36 @@ export async function startUiServer(options: UiServerOptions) {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             return json({ error: message }, /not found/i.test(message) ? 404 : 500);
+          }
+        }
+        const artifactMatch = path.match(/^\/api\/plans\/([^/]+)\/artifact$/);
+        if (request.method === "GET" && artifactMatch) {
+          const requested = url.searchParams.get("path");
+          const plans = await withFactoryLock(repositoryRoot, async () => {
+            await recoverFactoryTransaction(repositoryRoot);
+            return loadPlans(join(repositoryRoot, ".factory", "plans.jsonl"), []);
+          });
+          const latest = new Map<string, (typeof plans)[number]>();
+          for (const plan of plans) {
+            const current = latest.get(plan.id);
+            if (!current || plan.revision > current.revision) latest.set(plan.id, plan);
+          }
+          const plan = latest.get(artifactMatch[1]!);
+          if (!plan) return json({ error: "not found" }, 404);
+          if (!requested || !(plan.externalArtifacts ?? []).some((a) => a.path === requested))
+            return json({ error: "not found" }, 404);
+          if (!requested.endsWith(".html")) return json({ error: "not found" }, 404);
+          try {
+            const file = await resolveArtifactFile(repositoryRoot, requested);
+            return new Response(await readFile(file), {
+              headers: {
+                "content-type": "text/html; charset=utf-8",
+                "x-content-type-options": "nosniff",
+                "content-security-policy": "sandbox",
+              },
+            });
+          } catch {
+            return json({ error: "artifact file is missing" }, 404);
           }
         }
         if (

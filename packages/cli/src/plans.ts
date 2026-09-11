@@ -38,16 +38,22 @@ export const PLAN_INPUT_EXAMPLE: PlanInput = {
 
 export const PlanRevisionSchema = PlanSchema;
 
+/** Resolves a repository-relative artifact path to a canonical in-repository regular file. */
+export async function resolveArtifactFile(repositoryRoot: string, artifactPath: string) {
+  const root = await realpath(repositoryRoot);
+  const candidate = await realpath(resolve(root, artifactPath));
+  const relativePath = relative(root, candidate);
+  if (relativePath === ".." || relativePath.startsWith("../")) throw Error("outside repository");
+  if (!(await stat(candidate)).isFile()) throw Error("not a file");
+  return candidate;
+}
+
 /** Artifact paths are repository-relative, but their existence is a storage boundary concern. */
 export async function validatePlanArtifacts(plan: Plan, repositoryRoot: string) {
   const root = await realpath(repositoryRoot);
   for (const artifact of plan.externalArtifacts ?? []) {
     try {
-      const candidate = await realpath(resolve(root, artifact.path));
-      const relativePath = relative(root, candidate);
-      if (relativePath === ".." || relativePath.startsWith("../"))
-        throw Error("outside repository");
-      if (!(await stat(candidate)).isFile()) throw Error("not a file");
+      await resolveArtifactFile(root, artifact.path);
     } catch {
       throw Error(`External plan artifact is missing or outside the repository: ${artifact.path}`);
     }
